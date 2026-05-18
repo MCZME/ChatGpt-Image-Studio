@@ -395,6 +395,51 @@ export type RequestLogItem = {
   error?: string;
 };
 
+export type ImageAsset = {
+  id: string;
+  title: string;
+  prompt: string;
+  revisedPrompt?: string;
+  mode: "generate" | "edit" | string;
+  model: string;
+  createdAt: string;
+  updatedAt?: string;
+  conversationId?: string;
+  turnId?: string;
+  imageId?: string;
+  status?: string;
+  imageUrl?: string;
+  fileId?: string;
+  genId?: string;
+  sourceAccountId?: string;
+  category?: string;
+  tags?: string[];
+  note?: string;
+  favorite?: boolean;
+};
+
+export type ImageAssetListResponse = {
+  items: ImageAsset[];
+  categories: string[];
+  tags: string[];
+  total: number;
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+  nextOffset: number;
+  sort?: string;
+};
+
+export type ImageAssetTagStat = {
+  tag: string;
+  count: number;
+};
+
+export type ImageAssetCategoryStat = {
+  category: string;
+  count: number;
+};
+
 export type VersionInfo = {
   version: string;
   commit?: string;
@@ -737,6 +782,114 @@ export async function updateConfig(config: ConfigPayload) {
 
 export async function fetchRequestLogs() {
   return httpRequest<{ items: RequestLogItem[] }>("/api/requests");
+}
+
+export async function listImageAssets(params?: {
+  query?: string;
+  category?: string;
+  tag?: string;
+  favorite?: boolean;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+}) {
+  const search = new URLSearchParams();
+  if (params?.query?.trim()) {
+    search.set("query", params.query.trim());
+  }
+  if (params?.category?.trim()) {
+    search.set("category", params.category.trim());
+  }
+  if (params?.tag?.trim()) {
+    search.set("tag", params.tag.trim());
+  }
+  if (params?.favorite) {
+    search.set("favorite", "true");
+  }
+  if (typeof params?.limit === "number" && Number.isFinite(params.limit)) {
+    search.set("limit", String(params.limit));
+  }
+  if (typeof params?.offset === "number" && Number.isFinite(params.offset)) {
+    search.set("offset", String(params.offset));
+  }
+  if (params?.sort?.trim()) {
+    search.set("sort", params.sort.trim());
+  }
+  const suffix = search.size > 0 ? `?${search.toString()}` : "";
+  return httpRequest<ImageAssetListResponse>(`/api/image/assets${suffix}`);
+}
+
+export async function updateImageAsset(
+  id: string,
+  payload: {
+    category?: string;
+    tags?: string[];
+    note?: string;
+    favorite?: boolean;
+  },
+) {
+  return httpRequest<{ item: ImageAsset }>(
+    `/api/image/assets/${encodeURIComponent(id)}`,
+    {
+      method: "PUT",
+      body: payload,
+    },
+  );
+}
+
+export async function updateImageAssetsBulk(payload: {
+  ids: string[];
+  category?: string;
+  tags?: string[];
+  note?: string;
+  favorite?: boolean;
+}) {
+  return httpRequest<{ items: ImageAsset[] }>("/api/image/assets", {
+    method: "PUT",
+    body: payload,
+  });
+}
+
+export async function syncImageAssets(items: ImageAsset[]) {
+  return httpRequest<{ items: ImageAsset[] }>("/api/image/assets/sync", {
+    method: "POST",
+    body: { items },
+  });
+}
+
+export async function fetchImageAssetStats() {
+  return httpRequest<{
+    tags: ImageAssetTagStat[];
+    categories: ImageAssetCategoryStat[];
+  }>("/api/image/assets/stats");
+}
+
+export async function renameImageAssetTag(from: string, to: string) {
+  return httpRequest<{ ok: boolean }>("/api/image/assets/tags", {
+    method: "PATCH",
+    body: { from, to },
+  });
+}
+
+export async function deleteImageAssetTag(from: string) {
+  return httpRequest<{ ok: boolean }>("/api/image/assets/tags", {
+    method: "DELETE",
+    body: { from },
+  });
+}
+
+export async function renameImageAssetCategory(from: string, to: string) {
+  return httpRequest<{ ok: boolean }>("/api/image/assets/categories", {
+    method: "PATCH",
+    body: { from, to },
+  });
+}
+
+export async function deleteImageAssetCategory(from: string) {
+  return httpRequest<{ ok: boolean }>("/api/image/assets/categories", {
+    method: "DELETE",
+    body: { from },
+  });
 }
 
 export async function fetchVersionInfo() {

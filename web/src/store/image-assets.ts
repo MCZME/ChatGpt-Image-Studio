@@ -1,0 +1,145 @@
+"use client";
+
+import {
+  fetchConfig,
+  listImageAssets as listServerImageAssets,
+  syncImageAssets,
+  updateImageAsset as updateServerImageAsset,
+  updateImageAssetsBulk as updateServerImageAssetsBulk,
+  type ImageAsset,
+  type ImageAssetListResponse,
+  type ConfigPayload,
+} from "@/lib/api";
+import {
+  listImageConversations,
+  type ImageConversation,
+  type ImageConversationTurn,
+  type StoredImage,
+} from "@/store/image-conversations";
+
+function normalizeText(value?: string) {
+  return String(value || "").trim();
+}
+
+function summarizePrompt(prompt: string) {
+  const cleaned = normalizeText(prompt);
+  if (!cleaned) {
+    return "未命名图片";
+  }
+  return cleaned.length <= 32 ? cleaned : `${cleaned.slice(0, 32)}...`;
+}
+
+function buildAssetId(
+  conversation: ImageConversation,
+  turn: ImageConversationTurn,
+  image: StoredImage,
+  index: number,
+) {
+  const imageId = normalizeText(image.id) || `image-${index}`;
+  return [conversation.id, turn.id, imageId]
+    .map((item) => item.replace(/[\\/]/g, "-"))
+    .join("::");
+}
+
+function buildAssetFromTurn(
+  conversation: ImageConversation,
+  turn: ImageConversationTurn,
+  image: StoredImage,
+  index: number,
+): ImageAsset | null {
+  if (!normalizeText(image.url) && !normalizeText(image.b64_json)) {
+    return null;
+  }
+  return {
+    id: buildAssetId(conversation, turn, image, index),
+    title: normalizeText(turn.title) || summarizePrompt(turn.prompt),
+    prompt: normalizeText(turn.prompt),
+    revisedPrompt: normalizeText(image.revised_prompt) || undefined,
+    mode: turn.mode,
+    model: normalizeText(turn.model),
+    createdAt: normalizeText(turn.createdAt),
+    conversationId: normalizeText(conversation.id) || undefined,
+    turnId: normalizeText(turn.id) || undefined,
+    imageId: normalizeText(image.id) || undefined,
+    status: normalizeText(image.status) || undefined,
+    imageUrl: normalizeText(image.url) || undefined,
+    fileId: normalizeText(image.file_id) || undefined,
+    genId: normalizeText(image.gen_id) || undefined,
+    sourceAccountId: normalizeText(image.source_account_id) || undefined,
+  };
+}
+
+function collectConversationAssets(conversations: ImageConversation[]) {
+  const items: ImageAsset[] = [];
+  for (const conversation of conversations) {
+    const turns =
+      Array.isArray(conversation.turns) && conversation.turns.length > 0
+        ? conversation.turns
+        : [];
+    for (const turn of turns) {
+      for (const [index, image] of (turn.images || []).entries()) {
+        const item = buildAssetFromTurn(conversation, turn, image, index);
+        if (item) {
+          items.push(item);
+        }
+      }
+    }
+  }
+  return items;
+}
+
+async function syncConversationAssetsToBackend() {
+  const conversations = await listImageConversations();
+  const assets = collectConversationAssets(conversations);
+  await syncImageAssets(assets);
+}
+
+async function ensureAssetSyncConfig() {
+  try {
+    return await fetchConfig();
+  } catch {
+    return null;
+  }
+}
+
+export async function listUnifiedImageAssets(params?: {
+  query?: string;
+  category?: string;
+  tag?: string;
+  favorite?: boolean;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+}): Promise<ImageAssetListResponse> {
+  const config: ConfigPayload | null = await ensureAssetSyncConfig();
+  if (!config || config.storage.imageConversationStorage !== "server") {
+    await syncConversationAssetsToBackend();
+  }
+  return listServerImageAssets(params);
+}
+
+export async function syncUnifiedImageAssets() {
+  await syncConversationAssetsToBackend();
+}
+
+export async function updateUnifiedImageAsset(
+  id: string,
+  payload: {
+    category?: string;
+    tags?: string[];
+    note?: string;
+    favorite?: boolean;
+  },
+) {
+  return updateServerImageAsset(id, payload);
+}
+
+export async function updateUnifiedImageAssetsBulk(payload: {
+  ids: string[];
+  category?: string;
+  tags?: string[];
+  note?: string;
+  favorite?: boolean;
+}) {
+  return updateServerImageAssetsBulk(payload);
+}

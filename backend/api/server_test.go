@@ -2,9 +2,11 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -223,6 +225,496 @@ func TestImportImageConversationsIntoSQLiteTarget(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != "conv-1" {
 		t.Fatalf("imported items = %#v", items)
+	}
+}
+
+func TestHandleListImageAssetsBuildsItemsFromServerHistory(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-assets",
+		Title:     "测试图片",
+		Mode:      "generate",
+		Prompt:    "studio sunset poster",
+		Model:     "gpt-image-2",
+		Count:     1,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{
+			{
+				ID:        "turn-assets",
+				Title:     "测试图片",
+				Mode:      "generate",
+				Prompt:    "studio sunset poster",
+				Model:     "gpt-image-2",
+				Count:     1,
+				CreatedAt: "2026-05-18T08:00:00Z",
+				Status:    "success",
+				Images: []imagehistory.Image{
+					{
+						ID:            "img-assets",
+						Status:        "success",
+						URL:           "/v1/files/image/result-a.png",
+						RevisedPrompt: "sunset poster refined",
+						FileID:        "file-assets",
+						GenID:         "gen-assets",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(payload.Items))
+	}
+	if payload.Items[0].Prompt != "studio sunset poster" {
+		t.Fatalf("prompt = %q, want %q", payload.Items[0].Prompt, "studio sunset poster")
+	}
+	if payload.Items[0].ImageURL != "/v1/files/image/result-a.png" {
+		t.Fatalf("imageUrl = %q, want %q", payload.Items[0].ImageURL, "/v1/files/image/result-a.png")
+	}
+}
+
+func TestHandleUpdateImageAssetPersistsMetadata(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-assets",
+		Title:     "测试图片",
+		Mode:      "generate",
+		Prompt:    "studio sunset poster",
+		Model:     "gpt-image-2",
+		Count:     1,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{
+			{
+				ID:        "turn-assets",
+				Title:     "测试图片",
+				Mode:      "generate",
+				Prompt:    "studio sunset poster",
+				Model:     "gpt-image-2",
+				Count:     1,
+				CreatedAt: "2026-05-18T08:00:00Z",
+				Status:    "success",
+				Images: []imagehistory.Image{
+					{
+						ID:     "img-assets",
+						Status: "success",
+						URL:    "/v1/files/image/result-a.png",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+
+	seedReq := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	seedReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	seedRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusOK {
+		t.Fatalf("seed status = %d, body = %s", seedRec.Code, seedRec.Body.String())
+	}
+
+	updateBody := `{"category":"海报","tags":["落日","宣传"],"note":"首页横幅","favorite":true}`
+	req := httptest.NewRequest(http.MethodPut, "/api/image/assets/conv-assets::turn-assets::img-assets", strings.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Item imageAssetView `json:"item"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Item.Category != "海报" {
+		t.Fatalf("category = %q, want %q", payload.Item.Category, "海报")
+	}
+	if !payload.Item.Favorite {
+		t.Fatal("favorite = false, want true")
+	}
+	if len(payload.Item.Tags) != 2 {
+		t.Fatalf("tags = %#v, want 2 tags", payload.Item.Tags)
+	}
+}
+
+func TestHandleBulkUpdateImageAssetsPersistsMetadata(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-assets",
+		Title:     "测试图片",
+		Mode:      "generate",
+		Prompt:    "studio sunset poster",
+		Model:     "gpt-image-2",
+		Count:     2,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{
+			{
+				ID:        "turn-assets",
+				Title:     "测试图片",
+				Mode:      "generate",
+				Prompt:    "studio sunset poster",
+				Model:     "gpt-image-2",
+				Count:     2,
+				CreatedAt: "2026-05-18T08:00:00Z",
+				Status:    "success",
+				Images: []imagehistory.Image{
+					{ID: "img-1", Status: "success", URL: "/v1/files/image/result-a.png"},
+					{ID: "img-2", Status: "success", URL: "/v1/files/image/result-b.png"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	seedReq := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	seedReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	seedRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusOK {
+		t.Fatalf("seed status = %d, body = %s", seedRec.Code, seedRec.Body.String())
+	}
+
+	updateBody := `{"ids":["conv-assets::turn-assets::img-1","conv-assets::turn-assets::img-2"],"category":"批量海报","tags":["批量","横幅"]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/image/assets", strings.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(payload.Items))
+	}
+	for _, item := range payload.Items {
+		if item.Category != "批量海报" {
+			t.Fatalf("category = %q, want %q", item.Category, "批量海报")
+		}
+		if len(item.Tags) != 2 {
+			t.Fatalf("tags = %#v, want 2 tags", item.Tags)
+		}
+	}
+}
+
+func TestHandleListImageAssetsSupportsPagination(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	for index := 0; index < 3; index++ {
+		_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+			ID:        fmt.Sprintf("conv-page-%d", index),
+			Title:     "分页测试",
+			Mode:      "generate",
+			Prompt:    fmt.Sprintf("page asset %d", index),
+			Model:     "gpt-image-2",
+			Count:     1,
+			CreatedAt: fmt.Sprintf("2026-05-18T08:00:0%dZ", index),
+			Status:    "success",
+			Turns: []imagehistory.Turn{
+				{
+					ID:        fmt.Sprintf("turn-page-%d", index),
+					Title:     "分页测试",
+					Mode:      "generate",
+					Prompt:    fmt.Sprintf("page asset %d", index),
+					Model:     "gpt-image-2",
+					Count:     1,
+					CreatedAt: fmt.Sprintf("2026-05-18T08:00:0%dZ", index),
+					Status:    "success",
+					Images: []imagehistory.Image{
+						{
+							ID:     fmt.Sprintf("img-page-%d", index),
+							Status: "success",
+							URL:    fmt.Sprintf("/v1/files/image/page-%d.png", index),
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Save(history) returned error: %v", err)
+		}
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/image/assets?limit=2&offset=0", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items      []imageAssetView `json:"items"`
+		Total      int              `json:"total"`
+		HasMore    bool             `json:"hasMore"`
+		NextOffset int              `json:"nextOffset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(payload.Items))
+	}
+	if payload.Total != 3 {
+		t.Fatalf("total = %d, want 3", payload.Total)
+	}
+	if !payload.HasMore {
+		t.Fatal("hasMore = false, want true")
+	}
+	if payload.NextOffset != 2 {
+		t.Fatalf("nextOffset = %d, want 2", payload.NextOffset)
+	}
+}
+
+func TestHandleListImageAssetsSupportsSorting(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	seed := []struct {
+		id    string
+		title string
+	}{
+		{id: "conv-b", title: "Bravo"},
+		{id: "conv-a", title: "Alpha"},
+	}
+
+	for index, item := range seed {
+		_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+			ID:        item.id,
+			Title:     item.title,
+			Mode:      "generate",
+			Prompt:    item.title,
+			Model:     "gpt-image-2",
+			Count:     1,
+			CreatedAt: fmt.Sprintf("2026-05-18T08:00:0%dZ", index),
+			Status:    "success",
+			Turns: []imagehistory.Turn{
+				{
+					ID:        item.id + "-turn",
+					Title:     item.title,
+					Mode:      "generate",
+					Prompt:    item.title,
+					Model:     "gpt-image-2",
+					Count:     1,
+					CreatedAt: fmt.Sprintf("2026-05-18T08:00:0%dZ", index),
+					Status:    "success",
+					Images: []imagehistory.Image{
+						{
+							ID:     item.id + "-img",
+							Status: "success",
+							URL:    fmt.Sprintf("/v1/files/image/%s.png", item.id),
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Save(history) returned error: %v", err)
+		}
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/image/assets?sort=title_asc", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if len(payload.Items) < 2 {
+		t.Fatalf("items len = %d, want at least 2", len(payload.Items))
+	}
+	if payload.Items[0].Title != "Alpha" || payload.Items[1].Title != "Bravo" {
+		t.Fatalf("titles = [%s, %s], want [Alpha, Bravo]", payload.Items[0].Title, payload.Items[1].Title)
+	}
+}
+
+func TestDeleteConversationKeepsAssetReferencedImageFile(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	imagePath := filepath.Join(rootDir, "data", "assets-images", "result-keep.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(image dir) returned error: %v", err)
+	}
+	if err := os.WriteFile(imagePath, []byte("image"), 0o644); err != nil {
+		t.Fatalf("WriteFile(imagePath) returned error: %v", err)
+	}
+
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-keep",
+		Title:     "测试图片",
+		Mode:      "generate",
+		Prompt:    "keep file",
+		Model:     "gpt-image-2",
+		Count:     1,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{
+			{
+				ID:        "turn-keep",
+				Title:     "测试图片",
+				Mode:      "generate",
+				Prompt:    "keep file",
+				Model:     "gpt-image-2",
+				Count:     1,
+				CreatedAt: "2026-05-18T08:00:00Z",
+				Status:    "success",
+				Images: []imagehistory.Image{
+					{ID: "img-keep", Status: "success", URL: "/v1/files/image/result-keep.png"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	if err := historyStore.Delete(context.Background(), "conv-keep"); err != nil {
+		t.Fatalf("Delete(history) returned error: %v", err)
+	}
+
+	if _, err := os.Stat(imagePath); err != nil {
+		t.Fatalf("expected image file to remain after conversation delete: %v", err)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"chatgpt2api/internal/config"
+	"chatgpt2api/internal/imageassets"
 
 	"github.com/redis/go-redis/v9"
 	_ "modernc.org/sqlite"
@@ -84,8 +85,9 @@ type Conversation struct {
 }
 
 type Store struct {
-	backend  backend
-	imageDir string
+	backend    backend
+	imageDir   string
+	assetStore *imageassets.Store
 }
 
 type backend interface {
@@ -124,14 +126,28 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		_ = storage.Close()
 		return nil, err
 	}
-	return &Store{backend: storage, imageDir: imageDir}, nil
+	assetStore, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		_ = storage.Close()
+		return nil, err
+	}
+	return &Store{backend: storage, imageDir: imageDir, assetStore: assetStore}, nil
 }
 
 func (s *Store) Close() error {
 	if s == nil || s.backend == nil {
 		return nil
 	}
-	return s.backend.Close()
+	var closeErr error
+	if err := s.backend.Close(); err != nil {
+		closeErr = err
+	}
+	if s.assetStore != nil {
+		if err := s.assetStore.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 func (s *Store) List(ctx context.Context) ([]Conversation, error) {
@@ -153,6 +169,9 @@ func (s *Store) Save(ctx context.Context, conversation Conversation) (*Conversat
 		return nil, err
 	}
 	if err := s.backend.Save(ctx, normalized); err != nil {
+		return nil, err
+	}
+	if err := s.syncAssets(ctx, normalized); err != nil {
 		return nil, err
 	}
 	return &normalized, nil
@@ -183,6 +202,18 @@ func (s *Store) Clear(ctx context.Context) error {
 		return err
 	}
 	return s.cleanupCandidateFiles(ctx, candidateFiles)
+}
+
+func (s *Store) syncAssets(ctx context.Context, conversation Conversation) error {
+	if s == nil || s.assetStore == nil {
+		return nil
+	}
+	assets := extractImageAssets(conversation)
+	if len(assets) == 0 {
+		return nil
+	}
+	_, err := s.assetStore.SaveMany(ctx, assets)
+	return err
 }
 
 func (s *Store) normalizeConversation(conversation Conversation) (Conversation, error) {
@@ -407,6 +438,13 @@ func (s *Store) cleanupCandidateFiles(ctx context.Context, candidates map[string
 	for _, item := range remainingItems {
 		mergeFileSets(stillReferenced, collectConversationImageFiles(item))
 	}
+	if s.assetStore != nil {
+		assetFiles, err := s.assetStore.ReferencedFiles(ctx)
+		if err != nil {
+			return err
+		}
+		mergeFileSets(stillReferenced, assetFiles)
+	}
 	for filename := range candidates {
 		if _, exists := stillReferenced[filename]; exists {
 			continue
@@ -417,6 +455,75 @@ func (s *Store) cleanupCandidateFiles(ctx context.Context, candidates map[string
 		}
 	}
 	return nil
+}
+
+func extractImageAssets(conversation Conversation) []imageassets.Asset {
+	turns := conversation.Turns
+	if len(turns) == 0 {
+		turns = []Turn{{
+			ID:        conversation.ID + "-legacy",
+			Title:     conversation.Title,
+			Mode:      conversation.Mode,
+			Prompt:    conversation.Prompt,
+			Model:     conversation.Model,
+			Count:     conversation.Count,
+			Images:    conversation.Images,
+			CreatedAt: conversation.CreatedAt,
+			Status:    conversation.Status,
+			Error:     conversation.Error,
+		}}
+	}
+
+	result := make([]imageassets.Asset, 0)
+	for _, turn := range turns {
+		title := strings.TrimSpace(turn.Title)
+		if title == "" {
+			title = summarizeAssetPrompt(turn.Prompt)
+		}
+		for index, image := range turn.Images {
+			if strings.TrimSpace(image.URL) == "" && strings.TrimSpace(image.B64JSON) == "" {
+				continue
+			}
+			result = append(result, imageassets.Asset{
+				ID:              buildImageAssetID(conversation.ID, turn.ID, image.ID, index),
+				Title:           title,
+				Prompt:          strings.TrimSpace(turn.Prompt),
+				RevisedPrompt:   strings.TrimSpace(image.RevisedPrompt),
+				Mode:            strings.TrimSpace(turn.Mode),
+				Model:           strings.TrimSpace(turn.Model),
+				CreatedAt:       firstNonEmpty(strings.TrimSpace(turn.CreatedAt), strings.TrimSpace(conversation.CreatedAt)),
+				ConversationID:  strings.TrimSpace(conversation.ID),
+				TurnID:          strings.TrimSpace(turn.ID),
+				ImageID:         strings.TrimSpace(image.ID),
+				Status:          strings.TrimSpace(image.Status),
+				ImageURL:        strings.TrimSpace(image.URL),
+				ImageB64JSON:    strings.TrimSpace(image.B64JSON),
+				FileID:          strings.TrimSpace(image.FileID),
+				GenID:           strings.TrimSpace(image.GenID),
+				SourceAccountID: strings.TrimSpace(image.SourceAccountID),
+			})
+		}
+	}
+	return result
+}
+
+func buildImageAssetID(conversationID, turnID, imageID string, index int) string {
+	if trimmed := cleanID(imageID); trimmed != "" {
+		return cleanID(strings.Join([]string{cleanID(conversationID), cleanID(turnID), trimmed}, "::"))
+	}
+	return cleanID(fmt.Sprintf("%s::%s::image-%d", cleanID(conversationID), cleanID(turnID), index))
+}
+
+func summarizeAssetPrompt(prompt string) string {
+	cleaned := strings.TrimSpace(prompt)
+	if cleaned == "" {
+		return "未命名图片"
+	}
+	runes := []rune(cleaned)
+	if len(runes) <= 32 {
+		return cleaned
+	}
+	return string(runes[:32]) + "..."
 }
 
 func sortConversations(items []Conversation) {
