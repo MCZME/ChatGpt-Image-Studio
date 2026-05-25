@@ -347,7 +347,7 @@ func mimeFromFilename(name string) string {
 
 func sanitizeSourceKind(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "source", "mask", "result", "download":
+	case "source", "mask", "result", "download", "import":
 		return strings.ToLower(strings.TrimSpace(kind))
 	default:
 		return "image"

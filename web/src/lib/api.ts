@@ -437,6 +437,24 @@ export type ImageAssetListResponse = {
   sort?: string;
 };
 
+export type ImageAssetImportResponse = {
+  items?: ImageAsset[];
+  imported?: number;
+  succeeded?: number;
+  skipped?: number;
+  duplicates?: number;
+  errors?: Array<{
+    filename?: string;
+    fileName?: string;
+    error?: string;
+    message?: string;
+  }>;
+  failed?: Array<{
+    name?: string;
+    error?: string;
+  }>;
+};
+
 export type ImageAssetTagStat = {
   tag: string;
   count: number;
@@ -861,6 +879,31 @@ export async function syncImageAssets(items: ImageAsset[]) {
   return httpRequest<{ items: ImageAsset[] }>("/api/image/assets/sync", {
     method: "POST",
     body: { items },
+  });
+}
+
+export async function importImageAssets(
+  files: File[],
+  options: {
+    category?: string;
+    tags?: string[];
+    note?: string;
+  } = {},
+) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("images", file));
+  if (options.category?.trim()) {
+    formData.append("category", options.category.trim());
+  }
+  if (options.tags && options.tags.length > 0) {
+    formData.append("tags", options.tags.join(", "));
+  }
+  if (options.note?.trim()) {
+    formData.append("note", options.note.trim());
+  }
+  return httpRequest<ImageAssetImportResponse>("/api/image/assets/import", {
+    method: "POST",
+    body: formData,
   });
 }
 

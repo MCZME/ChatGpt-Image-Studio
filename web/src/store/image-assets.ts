@@ -2,6 +2,7 @@
 
 import {
   fetchConfig,
+  importImageAssets as importServerImageAssets,
   listImageAssets as listServerImageAssets,
   syncImageAssets,
   updateImageAsset as updateServerImageAsset,
@@ -120,6 +121,17 @@ export async function listUnifiedImageAssets(params?: {
 
 export async function syncUnifiedImageAssets() {
   await syncConversationAssetsToBackend();
+}
+
+export async function importUnifiedImageAssets(
+  files: File[],
+  options: {
+    category?: string;
+    tags?: string[];
+    note?: string;
+  } = {},
+) {
+  return importServerImageAssets(files, options);
 }
 
 export async function updateUnifiedImageAsset(

@@ -7,6 +7,7 @@ import {
   Database,
   Heart,
   LoaderCircle,
+  Upload,
   Search,
   Square,
   Tag,
@@ -31,6 +32,7 @@ import { cn } from "@/lib/utils";
 import { fetchImageAssetStats, type ImageAsset } from "@/lib/api";
 import {
   listUnifiedImageAssets,
+  importUnifiedImageAssets,
   updateUnifiedImageAsset,
   updateUnifiedImageAssetsBulk,
 } from "@/store/image-assets";
@@ -123,6 +125,18 @@ function splitTagsInput(value: string) {
   );
 }
 
+function countImportErrors(
+  result: Awaited<ReturnType<typeof importUnifiedImageAssets>>,
+) {
+  const failed =
+    Array.isArray(result.failed)
+      ? result.failed.length
+      : result.errors?.length ?? 0;
+  const imported = result.imported ?? result.succeeded ?? 0;
+  const skipped = result.skipped ?? result.duplicates ?? 0;
+  return { failed, imported, skipped };
+}
+
 const IMAGE_PAGE_SIZE = 48;
 
 const SORT_OPTIONS = [
@@ -170,12 +184,17 @@ export default function ImagesPage() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextOffset, setNextOffset] = useState(0);
   const [total, setTotal] = useState(0);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const nextOffsetRef = useRef(0);
   const requestSequenceRef = useRef(0);
+  const [importCategory, setImportCategory] = useState("");
+  const [importTags, setImportTags] = useState("");
+  const [importNote, setImportNote] = useState("");
 
   const refreshAssets = useCallback(async (mode: "reset" | "append" = "reset") => {
     const requestId = requestSequenceRef.current + 1;
@@ -388,6 +407,48 @@ export default function ImagesPage() {
     }
   };
 
+  const handlePickImportFiles = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleImportFiles = async (files: FileList | null) => {
+    const normalizedFiles = files ? Array.from(files) : [];
+    if (normalizedFiles.length === 0) {
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const data = await importUnifiedImageAssets(normalizedFiles, {
+        category: importCategory,
+        tags: splitTagsInput(importTags),
+        note: importNote,
+      });
+      const summary = countImportErrors(data);
+      await refreshAssets("reset");
+      setImportCategory("");
+      setImportTags("");
+      setImportNote("");
+      if (summary.failed > 0) {
+        toast.error(
+          `已导入 ${summary.imported} 张，失败 ${summary.failed} 张${summary.skipped > 0 ? `，跳过 ${summary.skipped} 张` : ""}`,
+        );
+      } else if (summary.skipped > 0) {
+        toast.success(
+          `已导入 ${summary.imported} 张，跳过 ${summary.skipped} 张重复图片`,
+        );
+      } else {
+        toast.success(`已导入 ${summary.imported} 张图片`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导入图片失败");
+    } finally {
+      setIsImporting(false);
+      if (importInputRef.current) {
+        importInputRef.current.value = "";
+      }
+    }
+  };
+
   return (
     <section className="h-full">
       <div className="hide-scrollbar h-full overflow-y-auto rounded-[30px] border border-stone-200 bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.96),_rgba(246,242,236,0.98)_42%,_rgba(238,231,220,0.98)_100%)] px-4 pb-6 pt-5 shadow-[0_18px_55px_-28px_rgba(73,52,28,0.28)] transition-colors duration-200 dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel)] sm:px-5 lg:px-6">
@@ -404,8 +465,31 @@ export default function ImagesPage() {
                 为图片保留提示词、分类、标签、备注和收藏状态。这里按图片资产管理，不再只按会话浏览。
               </p>
             </div>
-            <div className="rounded-[24px] border border-stone-200/80 bg-white/80 px-4 py-3 text-sm text-stone-600 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)] dark:text-[var(--studio-text-muted)]">
-              已加载 {items.length} / {total || items.length} 张匹配图片
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <div className="rounded-[24px] border border-stone-200/80 bg-white/80 px-4 py-3 text-sm text-stone-600 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)] dark:text-[var(--studio-text-muted)]">
+                已加载 {items.length} / {total || items.length} 张匹配图片
+              </div>
+              <Button
+                type="button"
+                className="rounded-full bg-stone-950 text-white hover:bg-stone-800"
+                onClick={handlePickImportFiles}
+                disabled={isImporting}
+              >
+                {isImporting ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <Upload className="size-4" />
+                )}
+                导入图片
+              </Button>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(event) => void handleImportFiles(event.target.files)}
+              />
             </div>
           </div>
 
@@ -514,6 +598,29 @@ export default function ImagesPage() {
               {isBulkSaving ? <LoaderCircle className="size-4 animate-spin" /> : null}
               批量更新
             </Button>
+          </div>
+
+          <div className="grid gap-3 rounded-[26px] border border-stone-200/80 bg-white/75 p-4 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)] lg:grid-cols-[220px_minmax(0,1fr)]">
+            <Input
+              value={importCategory}
+              onChange={(event) => setImportCategory(event.target.value)}
+              placeholder="导入分类（可选）"
+              className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
+            />
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+              <Input
+                value={importTags}
+                onChange={(event) => setImportTags(event.target.value)}
+                placeholder="导入标签，多个用逗号分隔（可选）"
+                className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
+              />
+              <Input
+                value={importNote}
+                onChange={(event) => setImportNote(event.target.value)}
+                placeholder="导入备注（可选）"
+                className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
+              />
+            </div>
           </div>
 
           {tagStats.length > 0 ? (

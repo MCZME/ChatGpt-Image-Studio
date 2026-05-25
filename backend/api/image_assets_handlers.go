@@ -3,9 +3,12 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"chatgpt2api/internal/imageassets"
 	"chatgpt2api/internal/imagehistory"
@@ -49,6 +52,11 @@ type imageAssetTagStatView struct {
 type imageAssetCategoryStatView struct {
 	Category string `json:"category"`
 	Count    int    `json:"count"`
+}
+
+type imageAssetImportFailureView struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
 }
 
 func (s *Server) handleListImageAssets(w http.ResponseWriter, r *http.Request) {
@@ -170,6 +178,101 @@ func (s *Server) handleBulkUpdateImageAssets(w http.ResponseWriter, r *http.Requ
 		result = append(result, buildImageAssetView(item))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *Server) handleImportImageAssets(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(int64(max(1, s.cfg.App.MaxUploadSizeMB)) << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+		return
+	}
+
+	files := imageAssetMultipartFiles(r.MultipartForm)
+	if len(files) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at least one image file is required"})
+		return
+	}
+
+	store, err := imageassets.NewStore(s.cfg.RootDir())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	defer store.Close()
+
+	category := strings.TrimSpace(r.FormValue("category"))
+	tags := splitImageAssetTags(r.FormValue("tags"))
+	note := strings.TrimSpace(r.FormValue("note"))
+	imageDir := s.cfg.ResolvePath(s.cfg.Storage.ImageDir)
+	maxImageBytes := int64(max(1, s.cfg.App.MaxUploadSizeMB)) << 20
+	imported := make([]imageAssetView, 0, len(files))
+	failures := []imageAssetImportFailureView{}
+
+	for _, fileHeader := range files {
+		name := strings.TrimSpace(fileHeader.Filename)
+		if name == "" {
+			name = "image"
+		}
+		if fileHeader.Size > maxImageBytes {
+			failures = append(failures, imageAssetImportFailureView{Name: name, Error: "image exceeds max upload size"})
+			continue
+		}
+		payload, err := readMultipartFile(fileHeader)
+		if err != nil {
+			failures = append(failures, imageAssetImportFailureView{Name: name, Error: err.Error()})
+			continue
+		}
+		mimeType := detectImportedImageMIME(payload, fileHeader.Header.Get("Content-Type"), name)
+		if mimeType == "" {
+			failures = append(failures, imageAssetImportFailureView{Name: name, Error: "file is not a supported image"})
+			continue
+		}
+		info, err := imageassets.SaveImageBytes(imageDir, payload, imageassets.FileSaveOptions{
+			SourceKind:   "import",
+			MIMEType:     mimeType,
+			OriginalName: name,
+		})
+		if err != nil {
+			failures = append(failures, imageAssetImportFailureView{Name: name, Error: err.Error()})
+			continue
+		}
+		asset := imageassets.Asset{
+			ID:          buildImportedImageAssetID(info.SHA256),
+			Title:       importedImageAssetTitle(name),
+			Mode:        "import",
+			Model:       "external",
+			CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			Status:      "success",
+			ImageURL:    info.URL,
+			Filename:    info.Filename,
+			MIMEType:    info.MIMEType,
+			SizeBytes:   info.SizeBytes,
+			SHA256:      info.SHA256,
+			StorageKind: info.StorageKind,
+			SourceKind:  info.SourceKind,
+			OriginalURL: strings.TrimSpace(name),
+			Category:    category,
+			Tags:        append([]string(nil), tags...),
+			Note:        note,
+		}
+		saved, err := store.Save(r.Context(), asset)
+		if err != nil {
+			failures = append(failures, imageAssetImportFailureView{Name: name, Error: err.Error()})
+			continue
+		}
+		imported = append(imported, buildImageAssetView(*saved))
+	}
+
+	status := http.StatusOK
+	if len(imported) == 0 && len(failures) > 0 {
+		status = http.StatusBadRequest
+	} else if len(failures) > 0 {
+		status = http.StatusMultiStatus
+	}
+	writeJSON(w, status, map[string]any{
+		"items":    imported,
+		"imported": len(imported),
+		"failed":   failures,
+	})
 }
 
 func (s *Server) handleImageAssetStats(w http.ResponseWriter, r *http.Request) {
@@ -512,4 +615,72 @@ func parseImageAssetIntQuery(r *http.Request, key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func imageAssetMultipartFiles(form *multipart.Form) []*multipart.FileHeader {
+	if form == nil {
+		return nil
+	}
+	result := []*multipart.FileHeader{}
+	for _, key := range []string{"images", "images[]", "image", "file", "files"} {
+		result = append(result, form.File[key]...)
+	}
+	return result
+}
+
+func buildImportedImageAssetID(sha256 string) string {
+	cleaned := strings.ToLower(strings.TrimSpace(sha256))
+	if cleaned == "" {
+		return cleanImageAssetID(fmt.Sprintf("import::%d", time.Now().UnixNano()))
+	}
+	return cleanImageAssetID("import::" + cleaned)
+}
+
+func importedImageAssetTitle(name string) string {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "." || base == "" {
+		return "导入图片"
+	}
+	ext := filepath.Ext(base)
+	title := strings.TrimSpace(strings.TrimSuffix(base, ext))
+	if title == "" {
+		return base
+	}
+	return title
+}
+
+func splitImageAssetTags(raw string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '，' || r == '\n' || r == '\t'
+	}) {
+		cleaned := strings.TrimSpace(value)
+		if cleaned == "" {
+			continue
+		}
+		key := strings.ToLower(cleaned)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, cleaned)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func detectImportedImageMIME(payload []byte, preferred, name string) string {
+	if len(payload) > 0 {
+		detected := http.DetectContentType(payload)
+		if !strings.HasPrefix(detected, "image/") {
+			return ""
+		}
+		return imageassets.DetectImageMIME(payload, detected, name)
+	}
+	mimeType := imageassets.DetectImageMIME(payload, preferred, name)
+	if !strings.HasPrefix(mimeType, "image/") {
+		return ""
+	}
+	return mimeType
 }

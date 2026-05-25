@@ -370,6 +370,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/image/assets/stats", s.requireUIAuth(http.HandlerFunc(s.handleImageAssetStats)))
 	mux.Handle("PUT /api/image/assets/{id}", s.requireUIAuth(http.HandlerFunc(s.handleUpdateImageAsset)))
 	mux.Handle("PUT /api/image/assets", s.requireUIAuth(http.HandlerFunc(s.handleBulkUpdateImageAssets)))
+	mux.Handle("POST /api/image/assets/import", s.requireUIAuth(http.HandlerFunc(s.handleImportImageAssets)))
 	mux.Handle("POST /api/image/assets/sync", s.requireUIAuth(http.HandlerFunc(s.handleSyncImageAssets)))
 	mux.Handle("PATCH /api/image/assets/tags", s.requireUIAuth(http.HandlerFunc(s.handleManageImageAssetTags)))
 	mux.Handle("DELETE /api/image/assets/tags", s.requireUIAuth(http.HandlerFunc(s.handleManageImageAssetTags)))
