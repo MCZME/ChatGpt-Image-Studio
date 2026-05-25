@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckSquare,
   Copy,
+  Database,
   Heart,
   LoaderCircle,
   Search,
@@ -58,6 +59,45 @@ function formatAssetTime(value: string) {
   }).format(date);
 }
 
+function formatAssetSize(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "";
+  }
+  const units = ["B", "KB", "MB", "GB"] as const;
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = unitIndex === 0 || size >= 10 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatAssetKind(value?: string | null) {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) {
+    return "";
+  }
+  const known: Record<string, string> = {
+    local: "本地文件",
+    remote: "远程链接",
+    legacy: "旧版数据",
+    generated: "生成图片",
+    uploaded: "上传图片",
+    conversation: "会话同步",
+  };
+  return known[cleaned] || cleaned.replace(/[_-]+/g, " ");
+}
+
+function formatAssetHash(value?: string | null) {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) {
+    return "";
+  }
+  return cleaned.length > 24 ? `${cleaned.slice(0, 12)}...${cleaned.slice(-8)}` : cleaned;
+}
+
 async function copyText(value: string, successMessage: string) {
   const cleaned = String(value || "").trim();
   if (!cleaned) {
@@ -93,6 +133,13 @@ const SORT_OPTIONS = [
   { value: "title_desc", label: "标题 Z-A" },
   { value: "favorite", label: "收藏优先" },
 ] as const;
+
+type AssetStorageDetail = {
+  label: string;
+  value: string;
+  title?: string;
+  url?: string;
+};
 
 function mergeAssetsById(current: ImageAsset[], incoming: ImageAsset[]) {
   const map = new Map(current.map((item) => [item.id, item] as const));
@@ -207,6 +254,30 @@ export default function ImagesPage() {
     () => normalizeImageURL(selectedAsset?.imageUrl),
     [selectedAsset?.imageUrl],
   );
+  const selectedAssetStorageDetails = useMemo<AssetStorageDetail[]>(() => {
+    if (!selectedAsset) {
+      return [];
+    }
+    const originalUrl = String(selectedAsset.originalUrl || "").trim();
+    return [
+      { label: "文件名", value: String(selectedAsset.filename || "").trim() },
+      { label: "大小", value: formatAssetSize(selectedAsset.sizeBytes) },
+      { label: "MIME", value: String(selectedAsset.mimeType || "").trim() },
+      { label: "存储", value: formatAssetKind(selectedAsset.storageKind) },
+      { label: "来源", value: formatAssetKind(selectedAsset.sourceKind) },
+      {
+        label: "SHA-256",
+        value: formatAssetHash(selectedAsset.sha256),
+        title: String(selectedAsset.sha256 || "").trim(),
+      },
+      {
+        label: "原始链接",
+        value: originalUrl,
+        title: originalUrl,
+        url: /^(https?:\/\/)/i.test(originalUrl) ? originalUrl : undefined,
+      },
+    ].filter((item) => item.value);
+  }, [selectedAsset]);
   const selectedAssetIdSet = useMemo(
     () => new Set(selectedAssetIds),
     [selectedAssetIds],
@@ -709,6 +780,39 @@ export default function ImagesPage() {
                       <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4 text-sm leading-7 text-stone-700">
                         {selectedAsset.revisedPrompt}
                       </div>
+                    </div>
+                  ) : null}
+
+                  {selectedAssetStorageDetails.length > 0 ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-sm font-medium text-stone-900">
+                        <Database className="size-4 text-stone-500" />
+                        存储信息
+                      </div>
+                      <dl className="grid grid-cols-1 gap-2 rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4 text-xs sm:grid-cols-2">
+                        {selectedAssetStorageDetails.map((item) => (
+                          <div key={item.label} className="min-w-0">
+                            <dt className="text-stone-400">{item.label}</dt>
+                            <dd
+                              className="mt-1 truncate font-medium text-stone-700"
+                              title={item.title || item.value}
+                            >
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline decoration-stone-300 underline-offset-2 hover:text-stone-950"
+                                >
+                                  {item.value}
+                                </a>
+                              ) : (
+                                item.value
+                              )}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
                     </div>
                   ) : null}
 

@@ -18,6 +18,8 @@ const (
 	exampleConfigFile = "config.example.toml"
 	userConfigFile    = "config.toml"
 	dataDirName       = "data"
+	legacyImageDir    = "data/tmp/image"
+	defaultImageDir   = "data/images"
 )
 
 var (
@@ -761,31 +763,54 @@ func sanitizeOverrideMap(raw map[string]any) bool {
 
 	changed := false
 	chatgptSection, ok := raw["chatgpt"].(map[string]any)
-	if !ok {
-		return false
+	if ok {
+		if value, ok := chatgptSection["image_mode"]; ok {
+			sanitized := sanitizeOverrideEntry("chatgpt", "image_mode", value)
+			if !reflect.DeepEqual(sanitized, value) {
+				chatgptSection["image_mode"] = sanitized
+				changed = true
+			}
+		}
 	}
-	if value, ok := chatgptSection["image_mode"]; ok {
-		sanitized := sanitizeOverrideEntry("chatgpt", "image_mode", value)
-		if !reflect.DeepEqual(sanitized, value) {
-			chatgptSection["image_mode"] = sanitized
-			changed = true
+	storageSection, ok := raw["storage"].(map[string]any)
+	if ok {
+		if value, ok := storageSection["image_dir"]; ok {
+			sanitized := sanitizeOverrideEntry("storage", "image_dir", value)
+			if !reflect.DeepEqual(sanitized, value) {
+				storageSection["image_dir"] = sanitized
+				changed = true
+			}
 		}
 	}
 	return changed
 }
 
 func sanitizeOverrideEntry(section, key string, value any) any {
-	if section != "chatgpt" || key != "image_mode" {
-		return value
-	}
-	text, ok := value.(string)
-	if !ok {
-		return value
-	}
-	if normalized, ok := normalizeImageMode(text); ok {
-		return normalized
+	switch section + "." + key {
+	case "chatgpt.image_mode":
+		text, ok := value.(string)
+		if !ok {
+			return value
+		}
+		if normalized, ok := normalizeImageMode(text); ok {
+			return normalized
+		}
+	case "storage.image_dir":
+		text, ok := value.(string)
+		if !ok {
+			return value
+		}
+		if isLegacyDefaultImageDir(text) {
+			return defaultImageDir
+		}
 	}
 	return value
+}
+
+func isLegacyDefaultImageDir(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(filepath.ToSlash(value)))
+	normalized = strings.TrimPrefix(normalized, "./")
+	return normalized == legacyImageDir
 }
 
 func writeOverrideMap(path string, raw map[string]any) error {

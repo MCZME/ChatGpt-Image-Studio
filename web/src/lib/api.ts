@@ -409,6 +409,13 @@ export type ImageAsset = {
   imageId?: string;
   status?: string;
   imageUrl?: string;
+  filename?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+  sha256?: string | null;
+  storageKind?: string | null;
+  sourceKind?: string | null;
+  originalUrl?: string | null;
   fileId?: string;
   genId?: string;
   sourceAccountId?: string;

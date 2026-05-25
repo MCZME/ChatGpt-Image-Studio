@@ -2,13 +2,10 @@ package imagehistory
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"mime"
 	"os"
 	"path/filepath"
 	"sort"
@@ -87,6 +84,7 @@ type Conversation struct {
 type Store struct {
 	backend    backend
 	imageDir   string
+	rootDir    string
 	assetStore *imageassets.Store
 }
 
@@ -131,7 +129,7 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		_ = storage.Close()
 		return nil, err
 	}
-	return &Store{backend: storage, imageDir: imageDir, assetStore: assetStore}, nil
+	return &Store{backend: storage, imageDir: imageDir, rootDir: cfg.RootDir(), assetStore: assetStore}, nil
 }
 
 func (s *Store) Close() error {
@@ -183,8 +181,14 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	candidateFiles := collectConversationImageFiles(*current)
+	candidateAssets := collectConversationAssetDeletes(*current)
 	if err := s.backend.Delete(ctx, cleanID(id)); err != nil {
 		return err
+	}
+	if s.assetStore != nil {
+		if err := s.assetStore.DeleteAutoAssets(ctx, candidateAssets); err != nil {
+			return err
+		}
 	}
 	return s.cleanupCandidateFiles(ctx, candidateFiles)
 }
@@ -195,11 +199,18 @@ func (s *Store) Clear(ctx context.Context) error {
 		return err
 	}
 	candidateFiles := map[string]struct{}{}
+	candidateAssets := []imageassets.DeleteAutoOptions{}
 	for _, item := range items {
 		mergeFileSets(candidateFiles, collectConversationImageFiles(item))
+		candidateAssets = append(candidateAssets, collectConversationAssetDeletes(item)...)
 	}
 	if err := s.backend.Clear(ctx); err != nil {
 		return err
+	}
+	if s.assetStore != nil {
+		if err := s.assetStore.DeleteAutoAssets(ctx, candidateAssets); err != nil {
+			return err
+		}
 	}
 	return s.cleanupCandidateFiles(ctx, candidateFiles)
 }
@@ -208,7 +219,7 @@ func (s *Store) syncAssets(ctx context.Context, conversation Conversation) error
 	if s == nil || s.assetStore == nil {
 		return nil
 	}
-	assets := extractImageAssets(conversation)
+	assets := s.extractImageAssets(conversation)
 	if len(assets) == 0 {
 		return nil
 	}
@@ -304,83 +315,19 @@ func (s *Store) normalizeConversation(conversation Conversation) (Conversation, 
 }
 
 func (s *Store) saveDataURLAsset(raw, kind, name string) (string, error) {
-	payload, mimeType, err := decodeDataURL(raw)
-	if err != nil {
-		return "", err
-	}
-	return s.saveAsset(payload, kind, firstNonEmpty(mimeType, mime.TypeByExtension(filepath.Ext(name)), defaultAssetMIME))
+	info, err := imageassets.SaveImageDataURL(s.imageDir, raw, imageassets.FileSaveOptions{
+		SourceKind:   kind,
+		OriginalName: name,
+	})
+	return info.URL, err
 }
 
 func (s *Store) saveBase64Asset(raw, kind, mimeType string) (string, error) {
-	payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(raw))
-	if err != nil {
-		return "", fmt.Errorf("decode image: %w", err)
-	}
-	return s.saveAsset(payload, kind, firstNonEmpty(mimeType, defaultAssetMIME))
-}
-
-func (s *Store) saveAsset(payload []byte, kind, mimeType string) (string, error) {
-	if len(payload) == 0 {
-		return "", fmt.Errorf("image is empty")
-	}
-	sum := sha256.Sum256(payload)
-	ext := extensionForMIME(mimeType)
-	filename := fmt.Sprintf("%s-%x%s", sanitizeKind(kind), sum[:16], ext)
-	path := filepath.Join(s.imageDir, filename)
-	if _, err := os.Stat(path); err == nil {
-		return "/v1/files/image/" + filename, nil
-	}
-	if err := os.MkdirAll(s.imageDir, 0o755); err != nil {
-		return "", err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	return "/v1/files/image/" + filename, nil
-}
-
-func decodeDataURL(raw string) ([]byte, string, error) {
-	comma := strings.Index(raw, ",")
-	if comma < 0 {
-		return nil, "", fmt.Errorf("invalid data url")
-	}
-	meta := raw[:comma]
-	if !strings.Contains(strings.ToLower(meta), ";base64") {
-		return nil, "", fmt.Errorf("only base64 data urls are supported")
-	}
-	mimeType := strings.TrimPrefix(strings.Split(meta, ";")[0], "data:")
-	payload, err := base64.StdEncoding.DecodeString(raw[comma+1:])
-	if err != nil {
-		return nil, "", fmt.Errorf("decode data url: %w", err)
-	}
-	return payload, mimeType, nil
-}
-
-func extensionForMIME(mimeType string) string {
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
-	case "image/jpeg", "image/jpg":
-		return ".jpg"
-	case "image/webp":
-		return ".webp"
-	case "image/gif":
-		return ".gif"
-	default:
-		return ".png"
-	}
-}
-
-func sanitizeKind(kind string) string {
-	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "source", "mask", "result":
-		return strings.ToLower(strings.TrimSpace(kind))
-	default:
-		return "image"
-	}
+	info, err := imageassets.SaveImageBase64(s.imageDir, raw, imageassets.FileSaveOptions{
+		SourceKind: kind,
+		MIMEType:   firstNonEmpty(mimeType, defaultAssetMIME),
+	})
+	return info.URL, err
 }
 
 func collectConversationImageFiles(conversation Conversation) map[string]struct{} {
@@ -406,6 +353,33 @@ func collectConversationImageFiles(conversation Conversation) map[string]struct{
 		collectResultFiles(turn.Images)
 	}
 	return files
+}
+
+func collectConversationAssetDeletes(conversation Conversation) []imageassets.DeleteAutoOptions {
+	result := []imageassets.DeleteAutoOptions{}
+	turns := conversation.Turns
+	if len(turns) == 0 {
+		turns = []Turn{{
+			ID:        conversation.ID + "-legacy",
+			Images:    conversation.Images,
+			CreatedAt: conversation.CreatedAt,
+		}}
+	}
+	for _, turn := range turns {
+		for _, image := range turn.Images {
+			filename := filenameFromImageURL(image.URL)
+			if filename == "" && image.ID == "" {
+				continue
+			}
+			result = append(result, imageassets.DeleteAutoOptions{
+				ConversationID: conversation.ID,
+				TurnID:         turn.ID,
+				ImageID:        image.ID,
+				Filename:       filename,
+			})
+		}
+	}
+	return result
 }
 
 func filenameFromImageURL(raw string) string {
@@ -449,15 +423,17 @@ func (s *Store) cleanupCandidateFiles(ctx context.Context, candidates map[string
 		if _, exists := stillReferenced[filename]; exists {
 			continue
 		}
-		path := filepath.Join(s.imageDir, filepath.Base(filename))
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		for _, dir := range imageassets.CandidateImageDirs(s.rootDir, s.imageDir) {
+			path := filepath.Join(dir, filepath.Base(filename))
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func extractImageAssets(conversation Conversation) []imageassets.Asset {
+func (s *Store) extractImageAssets(conversation Conversation) []imageassets.Asset {
 	turns := conversation.Turns
 	if len(turns) == 0 {
 		turns = []Turn{{
@@ -484,7 +460,7 @@ func extractImageAssets(conversation Conversation) []imageassets.Asset {
 			if strings.TrimSpace(image.URL) == "" && strings.TrimSpace(image.B64JSON) == "" {
 				continue
 			}
-			result = append(result, imageassets.Asset{
+			asset := imageassets.Asset{
 				ID:              buildImageAssetID(conversation.ID, turn.ID, image.ID, index),
 				Title:           title,
 				Prompt:          strings.TrimSpace(turn.Prompt),
@@ -501,10 +477,38 @@ func extractImageAssets(conversation Conversation) []imageassets.Asset {
 				FileID:          strings.TrimSpace(image.FileID),
 				GenID:           strings.TrimSpace(image.GenID),
 				SourceAccountID: strings.TrimSpace(image.SourceAccountID),
-			})
+			}
+			asset = s.enrichAssetFileMetadata(asset)
+			result = append(result, asset)
 		}
 	}
 	return result
+}
+
+func (s *Store) enrichAssetFileMetadata(asset imageassets.Asset) imageassets.Asset {
+	if s == nil {
+		return asset
+	}
+	info := imageassets.InspectStoredImageURL(
+		s.imageDir,
+		imageassets.CandidateImageDirs(s.rootDir, s.imageDir),
+		asset.ImageURL,
+	)
+	if info.Filename == "" {
+		return asset
+	}
+	asset.Filename = info.Filename
+	asset.MIMEType = info.MIMEType
+	asset.SizeBytes = info.SizeBytes
+	asset.SHA256 = info.SHA256
+	asset.StorageKind = info.StorageKind
+	if asset.SourceKind == "" {
+		asset.SourceKind = info.SourceKind
+	}
+	if asset.OriginalURL == "" {
+		asset.OriginalURL = info.OriginalURL
+	}
+	return asset
 }
 
 func buildImageAssetID(conversationID, turnID, imageID string, index int) string {

@@ -172,6 +172,79 @@ func TestLoadMigratesLegacyMixOverrideToStudio(t *testing.T) {
 	}
 }
 
+func TestLoadMigratesLegacyDefaultImageDir(t *testing.T) {
+	rootDir := t.TempDir()
+	dataDir := filepath.Join(rootDir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	overridePath := filepath.Join(dataDir, userConfigFile)
+	override := strings.Join([]string{
+		"[storage]",
+		`image_dir = "data/tmp/image"`,
+		"",
+		"[chatgpt]",
+		`image_mode = "studio"`,
+		`free_image_route = "legacy"`,
+		`paid_image_route = "responses"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(overridePath, []byte(override), 0o644); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+
+	cfg := New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	if cfg.Storage.ImageDir != "data/images" {
+		t.Fatalf("loaded image dir = %q, want data/images", cfg.Storage.ImageDir)
+	}
+
+	content, err := os.ReadFile(overridePath)
+	if err != nil {
+		t.Fatalf("read override: %v", err)
+	}
+	if !strings.Contains(string(content), `image_dir = "data/images"`) {
+		t.Fatalf("override file was not migrated to data/images: %s", string(content))
+	}
+	if strings.Contains(string(content), `image_dir = "data/tmp/image"`) {
+		t.Fatalf("override file still contains legacy image dir: %s", string(content))
+	}
+}
+
+func TestLoadPreservesCustomImageDir(t *testing.T) {
+	rootDir := t.TempDir()
+	dataDir := filepath.Join(rootDir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	overridePath := filepath.Join(dataDir, userConfigFile)
+	override := strings.Join([]string{
+		"[storage]",
+		`image_dir = "data/custom-images"`,
+		"",
+		"[chatgpt]",
+		`image_mode = "studio"`,
+		`free_image_route = "legacy"`,
+		`paid_image_route = "responses"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(overridePath, []byte(override), 0o644); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+
+	cfg := New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	if cfg.Storage.ImageDir != "data/custom-images" {
+		t.Fatalf("loaded image dir = %q, want custom path", cfg.Storage.ImageDir)
+	}
+}
+
 func TestNormalizeCPAImageRouteStrategyPreservesKnownValues(t *testing.T) {
 	tests := []struct {
 		name  string

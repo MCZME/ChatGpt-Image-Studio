@@ -38,6 +38,7 @@ Thumbs.db
 /backend/data/auths/*.json
 /backend/data/sync_state/*.json
 /backend/data/tmp/
+/backend/data/images
 /backend/data/last-startup-error.txt
 /backend/static/
 !/backend/data/auths/.gitkeep

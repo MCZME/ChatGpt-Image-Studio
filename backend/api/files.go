@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -9,43 +8,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"chatgpt2api/internal/imageassets"
 )
 
-const defaultImageDir = "data/tmp/image"
+const defaultImageDir = imageassets.DefaultImageDir
 
 // downloadAndCache downloads an upstream image using the image client's transport
 // (Chrome TLS fingerprint), saves to local disk, and returns the local filename.
 func downloadAndCache(client imageDownloader, upstreamURL string, cacheDir string) (string, error) {
-	// Generate a stable filename from the URL
-	hash := sha256.Sum256([]byte(upstreamURL))
-	filename := fmt.Sprintf("%x.png", hash[:12])
 	dir := firstNonEmpty(cacheDir, defaultImageDir)
-	localPath := filepath.Join(dir, filename)
-
-	// Check cache
-	if _, err := os.Stat(localPath); err == nil {
-		return filename, nil
-	}
-
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
 
 	data, err := client.DownloadBytes(upstreamURL)
 	if err != nil {
 		return "", fmt.Errorf("download upstream image: %w", err)
 	}
-
-	tmpFile := localPath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+	info, err := imageassets.SaveImageBytes(dir, data, imageassets.FileSaveOptions{
+		SourceKind:  "download",
+		OriginalURL: upstreamURL,
+	})
+	if err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmpFile, localPath); err != nil {
-		return "", err
-	}
 
-	slog.Info("cached image", "file", filename, "size", len(data))
-	return filename, nil
+	slog.Info("cached image", "file", info.Filename, "size", info.SizeBytes)
+	return info.Filename, nil
 }
 
 // gatewayImageURL builds the public URL for a cached image.
@@ -60,14 +47,9 @@ func gatewayImageURL(r *http.Request, filename string) string {
 
 func (s *Server) resolveImageFilePath(name string) string {
 	baseName := filepath.Base(strings.TrimSpace(name))
-	candidates := []string{
-		filepath.Join(s.cfg.ResolvePath(s.cfg.Storage.ImageDir), baseName),
-	}
-	legacyPath := filepath.Join(s.cfg.ResolvePath(defaultImageDir), baseName)
-	if !strings.EqualFold(filepath.Clean(legacyPath), filepath.Clean(candidates[0])) {
-		candidates = append(candidates, legacyPath)
-	}
-	for _, candidate := range candidates {
+	primaryDir := s.cfg.ResolvePath(s.cfg.Storage.ImageDir)
+	for _, dir := range imageassets.CandidateImageDirs(s.cfg.RootDir(), primaryDir) {
+		candidate := filepath.Join(dir, baseName)
 		info, err := os.Stat(candidate)
 		if err == nil && info.Mode().IsRegular() {
 			return candidate
