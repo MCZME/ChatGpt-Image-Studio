@@ -16,8 +16,13 @@ import (
 
 	"chatgpt2api/internal/accounts"
 	"chatgpt2api/internal/config"
+	"chatgpt2api/internal/imageassets"
 	"chatgpt2api/internal/imagehistory"
 )
+
+func ptrBool(value bool) *bool {
+	return &value
+}
 
 func TestShouldUseOfficialResponses(t *testing.T) {
 	tests := []struct {
@@ -118,6 +123,34 @@ func TestMigrateImageFilesSkipsNestedTargetDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(rootDir, "data", "tmp", "image", "nested", "nested", "sample.png")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected no recursive nested file, got err=%v", err)
+	}
+}
+
+func TestNewServerMigratesLegacyDefaultImageFiles(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.Storage.ImageDir = imageassets.DefaultImageDir
+
+	legacyDir := filepath.Join(rootDir, "data", "tmp", "image")
+	legacyPath := filepath.Join(legacyDir, "legacy.png")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(legacyDir) returned error: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("legacy-image"), 0o644); err != nil {
+		t.Fatalf("WriteFile(legacyPath) returned error: %v", err)
+	}
+
+	_ = NewServer(cfg, nil, nil)
+
+	newPath := filepath.Join(rootDir, "data", "images", "legacy.png")
+	if content, err := os.ReadFile(newPath); err != nil || string(content) != "legacy-image" {
+		t.Fatalf("expected legacy image migrated to default dir, content=%q err=%v", string(content), err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected legacy file removed after migration, got err=%v", err)
 	}
 }
 
@@ -708,6 +741,16 @@ func TestDeleteConversationKeepsAssetReferencedImageFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save(history) returned error: %v", err)
 	}
+	assetStore, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	defer assetStore.Close()
+	if _, err := assetStore.UpdateMetadata(context.Background(), "conv-keep::turn-keep::img-keep", imageassets.MetadataPatch{
+		Favorite: ptrBool(true),
+	}); err != nil {
+		t.Fatalf("UpdateMetadata(asset) returned error: %v", err)
+	}
 
 	if err := historyStore.Delete(context.Background(), "conv-keep"); err != nil {
 		t.Fatalf("Delete(history) returned error: %v", err)
@@ -715,6 +758,81 @@ func TestDeleteConversationKeepsAssetReferencedImageFile(t *testing.T) {
 
 	if _, err := os.Stat(imagePath); err != nil {
 		t.Fatalf("expected image file to remain after conversation delete: %v", err)
+	}
+}
+
+func TestHandleListImageAssetsReturnsStorageMetadata(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	imagePath := filepath.Join(rootDir, "data", "assets-images", "result-meta.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(image dir) returned error: %v", err)
+	}
+	if err := os.WriteFile(imagePath, []byte("metadata-image"), 0o644); err != nil {
+		t.Fatalf("WriteFile(imagePath) returned error: %v", err)
+	}
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-meta",
+		Title:     "Meta",
+		Mode:      "generate",
+		Prompt:    "metadata",
+		Model:     "gpt-image-2",
+		Count:     1,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{{
+			ID:        "turn-meta",
+			Title:     "Meta",
+			Mode:      "generate",
+			Prompt:    "metadata",
+			Model:     "gpt-image-2",
+			Count:     1,
+			CreatedAt: "2026-05-18T08:00:00Z",
+			Status:    "success",
+			Images: []imagehistory.Image{
+				{ID: "img-meta", Status: "success", URL: "/v1/files/image/result-meta.png"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(payload.Items))
+	}
+	item := payload.Items[0]
+	if item.Filename != "result-meta.png" || item.SizeBytes != int64(len("metadata-image")) || item.SHA256 == "" {
+		t.Fatalf("storage metadata = %#v, want filename, size, and sha256", item)
 	}
 }
 

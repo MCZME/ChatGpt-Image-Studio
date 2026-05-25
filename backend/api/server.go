@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"chatgpt2api/internal/buildinfo"
 	"chatgpt2api/internal/cliproxy"
 	"chatgpt2api/internal/config"
+	"chatgpt2api/internal/imageassets"
 	"chatgpt2api/internal/middleware"
 	"chatgpt2api/internal/newapi"
 	"chatgpt2api/internal/sub2api"
@@ -128,6 +130,9 @@ func NewServer(cfg *config.Config, store *accounts.Store, syncClient *cliproxy.C
 		},
 	}
 	server.imageTasks = newImageTaskManager(server)
+	if err := server.migrateLegacyDefaultImageFiles(); err != nil {
+		slog.Warn("migrate legacy default image files", slog.Any("error", err))
+	}
 	return server
 }
 
@@ -288,71 +293,21 @@ func (s *Server) reloadRuntimeDependencies(previous configPayload) error {
 func (s *Server) migrateImageFilesIfNeeded(previous, next configPayload) error {
 	oldDir := s.cfg.ResolvePath(previous.Storage.ImageDir)
 	newDir := s.cfg.ResolvePath(next.Storage.ImageDir)
-	if strings.EqualFold(filepath.Clean(oldDir), filepath.Clean(newDir)) {
-		return nil
-	}
-	info, err := os.Stat(oldDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return nil
-	}
-	if err := os.MkdirAll(newDir, 0o755); err != nil {
-		return err
-	}
-	normalizedNewDir := filepath.Clean(newDir)
-	return filepath.Walk(oldDir, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if info.IsDir() {
-			if strings.HasPrefix(filepath.Clean(path)+string(os.PathSeparator), normalizedNewDir+string(os.PathSeparator)) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(oldDir, path)
-		if err != nil {
-			return err
-		}
-		targetPath := filepath.Join(newDir, rel)
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-			return err
-		}
-		if _, err := os.Stat(targetPath); err == nil {
-			return os.Remove(path)
-		}
-		if err := os.Rename(path, targetPath); err == nil {
-			return nil
-		}
-		if err := copyFile(path, targetPath); err != nil {
-			return err
-		}
-		return os.Remove(path)
-	})
+	return imageassets.MoveImageFiles(oldDir, newDir)
 }
 
-func copyFile(sourcePath, targetPath string) error {
-	sourceFile, err := os.Open(sourcePath)
-	if err != nil {
-		return err
+func (s *Server) migrateLegacyDefaultImageFiles() error {
+	if s == nil || s.cfg == nil {
+		return nil
 	}
-	defer sourceFile.Close()
-
-	targetFile, err := os.Create(targetPath)
-	if err != nil {
-		return err
+	currentDir := s.cfg.ResolvePath(s.cfg.Storage.ImageDir)
+	if !imageassets.IsDefaultImageDir(s.cfg.RootDir(), currentDir) {
+		return nil
 	}
-	defer targetFile.Close()
-
-	if _, err := io.Copy(targetFile, sourceFile); err != nil {
-		return err
-	}
-	return nil
+	return imageassets.MoveImageFiles(
+		imageassets.LegacyImageDirPath(s.cfg.RootDir()),
+		imageassets.DefaultImageDirPath(s.cfg.RootDir()),
+	)
 }
 
 func storageSettingsChanged(previous, next configPayload) bool {

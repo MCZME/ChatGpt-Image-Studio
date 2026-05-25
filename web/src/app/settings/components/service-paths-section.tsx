@@ -372,7 +372,7 @@ export function ServicePathsSection({
                   title: "填写示例",
                   body: (
                     <>
-                      <code>data/tmp/image</code>。
+                      <code>data/images</code>。旧 <code>data/tmp/image</code> 仅作为兼容读取。
                     </>
                   ),
                 },

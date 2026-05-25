@@ -25,6 +25,13 @@ type imageAssetView struct {
 	ImageID         string   `json:"imageId,omitempty"`
 	Status          string   `json:"status,omitempty"`
 	ImageURL        string   `json:"imageUrl,omitempty"`
+	Filename        string   `json:"filename,omitempty"`
+	MIMEType        string   `json:"mimeType,omitempty"`
+	SizeBytes       int64    `json:"sizeBytes,omitempty"`
+	SHA256          string   `json:"sha256,omitempty"`
+	StorageKind     string   `json:"storageKind,omitempty"`
+	SourceKind      string   `json:"sourceKind,omitempty"`
+	OriginalURL     string   `json:"originalUrl,omitempty"`
 	FileID          string   `json:"fileId,omitempty"`
 	GenID           string   `json:"genId,omitempty"`
 	SourceAccountID string   `json:"sourceAccountId,omitempty"`
@@ -319,13 +326,13 @@ func (s *Server) syncImageAssetsFromHistory(r *http.Request, store *imageassets.
 
 	assets := make([]imageassets.Asset, 0)
 	for _, conversation := range conversations {
-		assets = append(assets, extractImageAssetsFromConversation(conversation)...)
+		assets = append(assets, s.extractImageAssetsFromConversation(conversation)...)
 	}
 	_, err = store.SaveMany(r.Context(), assets)
 	return err
 }
 
-func extractImageAssetsFromConversation(conversation imagehistory.Conversation) []imageassets.Asset {
+func (s *Server) extractImageAssetsFromConversation(conversation imagehistory.Conversation) []imageassets.Asset {
 	turns := conversation.Turns
 	if len(turns) == 0 {
 		turns = []imagehistory.Turn{{
@@ -353,7 +360,7 @@ func extractImageAssetsFromConversation(conversation imagehistory.Conversation) 
 				continue
 			}
 			assetID := buildImageAssetID(conversation.ID, turn.ID, image.ID, index)
-			items = append(items, imageassets.Asset{
+			asset := imageassets.Asset{
 				ID:              assetID,
 				Title:           title,
 				Prompt:          strings.TrimSpace(turn.Prompt),
@@ -370,10 +377,38 @@ func extractImageAssetsFromConversation(conversation imagehistory.Conversation) 
 				FileID:          strings.TrimSpace(image.FileID),
 				GenID:           strings.TrimSpace(image.GenID),
 				SourceAccountID: strings.TrimSpace(image.SourceAccountID),
-			})
+			}
+			asset = s.enrichImageAssetFileMetadata(asset)
+			items = append(items, asset)
 		}
 	}
 	return items
+}
+
+func (s *Server) enrichImageAssetFileMetadata(asset imageassets.Asset) imageassets.Asset {
+	if s == nil || s.cfg == nil {
+		return asset
+	}
+	info := imageassets.InspectStoredImageURL(
+		s.cfg.ResolvePath(s.cfg.Storage.ImageDir),
+		imageassets.CandidateImageDirs(s.cfg.RootDir(), s.cfg.ResolvePath(s.cfg.Storage.ImageDir)),
+		asset.ImageURL,
+	)
+	if info.Filename == "" {
+		return asset
+	}
+	asset.Filename = info.Filename
+	asset.MIMEType = info.MIMEType
+	asset.SizeBytes = info.SizeBytes
+	asset.SHA256 = info.SHA256
+	asset.StorageKind = info.StorageKind
+	if asset.SourceKind == "" {
+		asset.SourceKind = info.SourceKind
+	}
+	if asset.OriginalURL == "" {
+		asset.OriginalURL = info.OriginalURL
+	}
+	return asset
 }
 
 func buildImageAssetID(conversationID, turnID, imageID string, index int) string {
@@ -421,6 +456,13 @@ func buildImageAssetView(item imageassets.Asset) imageAssetView {
 		ImageID:         item.ImageID,
 		Status:          item.Status,
 		ImageURL:        normalizeImageAssetURL(item.ImageURL),
+		Filename:        item.Filename,
+		MIMEType:        item.MIMEType,
+		SizeBytes:       item.SizeBytes,
+		SHA256:          item.SHA256,
+		StorageKind:     item.StorageKind,
+		SourceKind:      item.SourceKind,
+		OriginalURL:     item.OriginalURL,
 		FileID:          item.FileID,
 		GenID:           item.GenID,
 		SourceAccountID: item.SourceAccountID,

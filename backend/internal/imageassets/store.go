@@ -31,6 +31,13 @@ type Asset struct {
 	Status          string   `json:"status,omitempty"`
 	ImageURL        string   `json:"imageUrl,omitempty"`
 	ImageB64JSON    string   `json:"imageB64Json,omitempty"`
+	Filename        string   `json:"filename,omitempty"`
+	MIMEType        string   `json:"mimeType,omitempty"`
+	SizeBytes       int64    `json:"sizeBytes,omitempty"`
+	SHA256          string   `json:"sha256,omitempty"`
+	StorageKind     string   `json:"storageKind,omitempty"`
+	SourceKind      string   `json:"sourceKind,omitempty"`
+	OriginalURL     string   `json:"originalUrl,omitempty"`
 	FileID          string   `json:"fileId,omitempty"`
 	GenID           string   `json:"genId,omitempty"`
 	SourceAccountID string   `json:"sourceAccountId,omitempty"`
@@ -53,6 +60,13 @@ type BulkMetadataPatch struct {
 	Tags     *[]string `json:"tags,omitempty"`
 	Note     *string   `json:"note,omitempty"`
 	Favorite *bool     `json:"favorite,omitempty"`
+}
+
+type DeleteAutoOptions struct {
+	ConversationID string
+	TurnID         string
+	ImageID        string
+	Filename       string
 }
 
 type FilterOptions struct {
@@ -88,6 +102,13 @@ type Store struct {
 	db *sql.DB
 }
 
+type assetColumnSpec struct {
+	Name       string
+	SQL        string
+	Required   bool
+	CreateOnly bool
+}
+
 type sortMode string
 
 const (
@@ -98,6 +119,36 @@ const (
 	sortTitleDesc   sortMode = "title_desc"
 	sortFavorite    sortMode = "favorite"
 )
+
+var assetColumnSpecs = []assetColumnSpec{
+	{Name: "id", SQL: "id TEXT PRIMARY KEY", Required: true, CreateOnly: true},
+	{Name: "title", SQL: "title TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "prompt", SQL: "prompt TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "revised_prompt", SQL: "revised_prompt TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "mode", SQL: "mode TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "model", SQL: "model TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "created_at", SQL: "created_at TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "updated_at", SQL: "updated_at TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "conversation_id", SQL: "conversation_id TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "turn_id", SQL: "turn_id TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "image_id", SQL: "image_id TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "status", SQL: "status TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "image_url", SQL: "image_url TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "image_b64_json", SQL: "image_b64_json TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "filename", SQL: "filename TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "mime_type", SQL: "mime_type TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "size_bytes", SQL: "size_bytes INTEGER NOT NULL DEFAULT 0", Required: true},
+	{Name: "sha256", SQL: "sha256 TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "storage_kind", SQL: "storage_kind TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "source_kind", SQL: "source_kind TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "original_url", SQL: "original_url TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "file_id", SQL: "file_id TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "gen_id", SQL: "gen_id TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "source_account_id", SQL: "source_account_id TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "category", SQL: "category TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "note", SQL: "note TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "favorite", SQL: "favorite INTEGER NOT NULL DEFAULT 0", Required: true},
+}
 
 func NewStore(rootDir string) (*Store, error) {
 	dbPath := resolveAssetSQLitePath(rootDir)
@@ -128,32 +179,13 @@ func (s *Store) init() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("asset store is unavailable")
 	}
-	if err := s.resetIncompatibleSchema(); err != nil {
+	if err := s.ensureAssetSchema(); err != nil {
+		return err
+	}
+	if err := s.ensureAuxiliarySchemas(); err != nil {
 		return err
 	}
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS image_assets (
-			id TEXT PRIMARY KEY,
-			title TEXT NOT NULL,
-			prompt TEXT NOT NULL,
-			revised_prompt TEXT NOT NULL DEFAULT '',
-			mode TEXT NOT NULL,
-			model TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			conversation_id TEXT NOT NULL DEFAULT '',
-			turn_id TEXT NOT NULL DEFAULT '',
-			image_id TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT '',
-			image_url TEXT NOT NULL DEFAULT '',
-			image_b64_json TEXT NOT NULL DEFAULT '',
-			file_id TEXT NOT NULL DEFAULT '',
-			gen_id TEXT NOT NULL DEFAULT '',
-			source_account_id TEXT NOT NULL DEFAULT '',
-			category TEXT NOT NULL DEFAULT '',
-			note TEXT NOT NULL DEFAULT '',
-			favorite INTEGER NOT NULL DEFAULT 0
-		);`,
 		`CREATE TABLE IF NOT EXISTS image_asset_tags (
 			asset_id TEXT NOT NULL,
 			tag TEXT NOT NULL,
@@ -179,6 +211,162 @@ func (s *Store) init() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureAuxiliarySchemas() error {
+	tagExists, err := tableExists(s.db, "image_asset_tags")
+	if err != nil {
+		return err
+	}
+	if tagExists {
+		tagColumns, err := tableColumns(s.db, "image_asset_tags")
+		if err != nil {
+			return err
+		}
+		if !containsColumns(tagColumns, []string{"asset_id", "tag"}) {
+			if _, err := s.db.Exec(`DROP TABLE IF EXISTS image_asset_tags`); err != nil {
+				return err
+			}
+		}
+	}
+
+	ftsExists, err := tableExists(s.db, "image_assets_fts")
+	if err != nil {
+		return err
+	}
+	if ftsExists {
+		ftsColumns, err := tableColumns(s.db, "image_assets_fts")
+		if err != nil {
+			return err
+		}
+		if !containsColumns(ftsColumns, []string{"asset_id", "title", "prompt", "revised_prompt", "note"}) {
+			if _, err := s.db.Exec(`DROP TABLE IF EXISTS image_assets_fts`); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureAssetSchema() error {
+	exists, err := tableExists(s.db, "image_assets")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		_, err := s.db.Exec(`CREATE TABLE image_assets (` + assetCreateColumnsSQL() + `);`)
+		return err
+	}
+
+	columns, err := tableColumnDetails(s.db, "image_assets")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["id"]; !ok {
+		return fmt.Errorf("incompatible image_assets schema: missing id column")
+	}
+	if hasBlockingUnknownColumns(columns) {
+		if err := s.rebuildAssetTable(columns); err != nil {
+			return err
+		}
+		columns, err = tableColumnDetails(s.db, "image_assets")
+		if err != nil {
+			return err
+		}
+	}
+	for _, spec := range assetColumnSpecs {
+		if _, ok := columns[spec.Name]; ok {
+			continue
+		}
+		if spec.CreateOnly {
+			return fmt.Errorf("incompatible image_assets schema: missing %s column", spec.Name)
+		}
+		if _, err := s.db.Exec(`ALTER TABLE image_assets ADD COLUMN ` + spec.SQL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) rebuildAssetTable(columns map[string]tableColumnDetail) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DROP TABLE IF EXISTS image_assets_fts`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE image_assets_new (` + assetCreateColumnsSQL() + `);`); err != nil {
+		return err
+	}
+
+	names := make([]string, 0, len(assetColumnSpecs))
+	expressions := make([]string, 0, len(assetColumnSpecs))
+	for _, spec := range assetColumnSpecs {
+		names = append(names, quoteIdentifier(spec.Name))
+		expressions = append(expressions, assetMigrationExpression(spec, columns))
+	}
+	if _, err = tx.Exec(
+		`INSERT OR IGNORE INTO image_assets_new (` + strings.Join(names, ", ") + `) SELECT ` + strings.Join(expressions, ", ") + ` FROM image_assets`,
+	); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DROP TABLE image_assets`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`ALTER TABLE image_assets_new RENAME TO image_assets`); err != nil {
+		return err
+	}
+	err = tx.Commit()
+	return err
+}
+
+func assetCreateColumnsSQL() string {
+	parts := make([]string, 0, len(assetColumnSpecs))
+	for _, spec := range assetColumnSpecs {
+		parts = append(parts, spec.SQL)
+	}
+	return strings.Join(parts, ",\n")
+}
+
+func assetMigrationExpression(spec assetColumnSpec, columns map[string]tableColumnDetail) string {
+	if _, ok := columns[spec.Name]; ok {
+		quoted := quoteIdentifier(spec.Name)
+		switch spec.Name {
+		case "favorite", "size_bytes":
+			return "COALESCE(" + quoted + ", 0)"
+		default:
+			return "COALESCE(CAST(" + quoted + " AS TEXT), '')"
+		}
+	}
+	switch spec.Name {
+	case "favorite", "size_bytes":
+		return "0"
+	default:
+		return "''"
+	}
+}
+
+func hasBlockingUnknownColumns(columns map[string]tableColumnDetail) bool {
+	known := map[string]struct{}{}
+	for _, spec := range assetColumnSpecs {
+		known[spec.Name] = struct{}{}
+	}
+	for name, column := range columns {
+		if _, ok := known[name]; ok {
+			continue
+		}
+		if column.PrimaryKey == 0 && column.NotNull != 0 && !column.Default.Valid {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) resetIncompatibleSchema() error {
@@ -279,6 +467,25 @@ func tableExists(db *sql.DB, name string) (bool, error) {
 }
 
 func tableColumns(db *sql.DB, tableName string) ([]string, error) {
+	details, err := tableColumnDetails(db, tableName)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(details))
+	for name := range details {
+		result = append(result, name)
+	}
+	return result, nil
+}
+
+type tableColumnDetail struct {
+	Name       string
+	NotNull    int
+	Default    sql.NullString
+	PrimaryKey int
+}
+
+func tableColumnDetails(db *sql.DB, tableName string) (map[string]tableColumnDetail, error) {
 	name := strings.TrimSpace(tableName)
 	if name == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -289,7 +496,7 @@ func tableColumns(db *sql.DB, tableName string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	result := []string{}
+	result := map[string]tableColumnDetail{}
 	for rows.Next() {
 		var (
 			cid        int
@@ -302,9 +509,19 @@ func tableColumns(db *sql.DB, tableName string) ([]string, error) {
 		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
 			return nil, err
 		}
-		result = append(result, strings.ToLower(strings.TrimSpace(columnName)))
+		normalized := strings.ToLower(strings.TrimSpace(columnName))
+		result[normalized] = tableColumnDetail{
+			Name:       normalized,
+			NotNull:    notNull,
+			Default:    defaultVal,
+			PrimaryKey: primaryKey,
+		}
 	}
 	return result, rows.Err()
+}
+
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(strings.TrimSpace(name), `"`, `""`) + `"`
 }
 
 func containsColumns(columns []string, required []string) bool {
@@ -355,6 +572,7 @@ func (s *Store) ListPage(ctx context.Context, filter FilterOptions) (ListResult,
 		SELECT DISTINCT
 			a.id, a.title, a.prompt, a.revised_prompt, a.mode, a.model, a.created_at, a.updated_at,
 			a.conversation_id, a.turn_id, a.image_id, a.status, a.image_url, a.image_b64_json,
+			a.filename, a.mime_type, a.size_bytes, a.sha256, a.storage_kind, a.source_kind, a.original_url,
 			a.file_id, a.gen_id, a.source_account_id, a.category, a.note, a.favorite
 		FROM image_assets a`
 	joins := []string{}
@@ -464,6 +682,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Asset, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, title, prompt, revised_prompt, mode, model, created_at, updated_at,
 		       conversation_id, turn_id, image_id, status, image_url, image_b64_json,
+		       filename, mime_type, size_bytes, sha256, storage_kind, source_kind, original_url,
 		       file_id, gen_id, source_account_id, category, note, favorite
 		FROM image_assets
 		WHERE id = ?`, cleanID(id))
@@ -498,6 +717,27 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 		}
 		if !normalized.Favorite {
 			normalized.Favorite = current.Favorite
+		}
+		if normalized.Filename == "" {
+			normalized.Filename = current.Filename
+		}
+		if normalized.MIMEType == "" {
+			normalized.MIMEType = current.MIMEType
+		}
+		if normalized.SizeBytes == 0 {
+			normalized.SizeBytes = current.SizeBytes
+		}
+		if normalized.SHA256 == "" {
+			normalized.SHA256 = current.SHA256
+		}
+		if normalized.StorageKind == "" {
+			normalized.StorageKind = current.StorageKind
+		}
+		if normalized.SourceKind == "" {
+			normalized.SourceKind = current.SourceKind
+		}
+		if normalized.OriginalURL == "" {
+			normalized.OriginalURL = current.OriginalURL
 		}
 	} else if err != nil {
 		return nil, err
@@ -574,6 +814,54 @@ func (s *Store) UpdateMetadataBatch(ctx context.Context, patch BulkMetadataPatch
 	return result, nil
 }
 
+func (s *Store) DeleteAutoAsset(ctx context.Context, options DeleteAutoOptions) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	conditions := []string{}
+	args := []any{}
+	if conversationID := cleanID(options.ConversationID); conversationID != "" {
+		conditions = append(conditions, `conversation_id = ?`)
+		args = append(args, conversationID)
+	}
+	if turnID := cleanID(options.TurnID); turnID != "" {
+		conditions = append(conditions, `turn_id = ?`)
+		args = append(args, turnID)
+	}
+	if imageID := cleanID(options.ImageID); imageID != "" {
+		conditions = append(conditions, `image_id = ?`)
+		args = append(args, imageID)
+	}
+	if filename := filepath.Base(strings.TrimSpace(options.Filename)); filename != "" && filename != "." {
+		conditions = append(conditions, `(filename = ? OR image_url LIKE ?)`)
+		args = append(args, filename, "%"+filename)
+	}
+	if len(conditions) == 0 {
+		return nil
+	}
+
+	query := `DELETE FROM image_assets
+		WHERE ` + strings.Join(conditions, " AND ") + `
+		  AND favorite = 0
+		  AND category = ''
+		  AND note = ''
+		  AND NOT EXISTS (
+			SELECT 1 FROM image_asset_tags tags
+			WHERE tags.asset_id = image_assets.id
+		  )`
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *Store) DeleteAutoAssets(ctx context.Context, options []DeleteAutoOptions) error {
+	for _, option := range options {
+		if err := s.DeleteAutoAsset(ctx, option); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) ReferencedFiles(ctx context.Context) (map[string]struct{}, error) {
 	items, err := s.List(ctx)
 	if err != nil {
@@ -581,6 +869,10 @@ func (s *Store) ReferencedFiles(ctx context.Context) (map[string]struct{}, error
 	}
 	files := map[string]struct{}{}
 	for _, item := range items {
+		if filename := filepath.Base(strings.TrimSpace(item.Filename)); filename != "" && filename != "." {
+			files[filename] = struct{}{}
+			continue
+		}
 		if filename := filenameFromAssetURL(item.ImageURL); filename != "" {
 			files[filename] = struct{}{}
 		}
@@ -610,8 +902,9 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 		INSERT INTO image_assets (
 			id, title, prompt, revised_prompt, mode, model, created_at, updated_at,
 			conversation_id, turn_id, image_id, status, image_url, image_b64_json,
+			filename, mime_type, size_bytes, sha256, storage_kind, source_kind, original_url,
 			file_id, gen_id, source_account_id, category, note, favorite
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = excluded.title,
 			prompt = excluded.prompt,
@@ -626,6 +919,13 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 			status = excluded.status,
 			image_url = excluded.image_url,
 			image_b64_json = excluded.image_b64_json,
+			filename = excluded.filename,
+			mime_type = excluded.mime_type,
+			size_bytes = excluded.size_bytes,
+			sha256 = excluded.sha256,
+			storage_kind = excluded.storage_kind,
+			source_kind = excluded.source_kind,
+			original_url = excluded.original_url,
 			file_id = excluded.file_id,
 			gen_id = excluded.gen_id,
 			source_account_id = excluded.source_account_id,
@@ -646,6 +946,13 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 		normalized.Status,
 		normalized.ImageURL,
 		normalized.ImageB64JSON,
+		normalized.Filename,
+		normalized.MIMEType,
+		normalized.SizeBytes,
+		normalized.SHA256,
+		normalized.StorageKind,
+		normalized.SourceKind,
+		normalized.OriginalURL,
 		normalized.FileID,
 		normalized.GenID,
 		normalized.SourceAccountID,
@@ -864,6 +1171,13 @@ func scanAssetRow(scanner rowScanner) (Asset, error) {
 		&item.Status,
 		&item.ImageURL,
 		&item.ImageB64JSON,
+		&item.Filename,
+		&item.MIMEType,
+		&item.SizeBytes,
+		&item.SHA256,
+		&item.StorageKind,
+		&item.SourceKind,
+		&item.OriginalURL,
 		&item.FileID,
 		&item.GenID,
 		&item.SourceAccountID,
@@ -875,6 +1189,18 @@ func scanAssetRow(scanner rowScanner) (Asset, error) {
 		return Asset{}, err
 	}
 	item.Favorite = favorite != 0
+	if item.Filename == "" {
+		item.Filename = FilenameFromImageURL(item.ImageURL)
+	}
+	if item.MIMEType == "" {
+		item.MIMEType = DetectImageMIME(nil, "", item.Filename)
+	}
+	if item.StorageKind == "" && item.Filename != "" {
+		item.StorageKind = "local"
+	}
+	if item.SourceKind == "" && item.Filename != "" {
+		item.SourceKind = sourceKindFromFilename(item.Filename)
+	}
 	return item, nil
 }
 
@@ -894,6 +1220,24 @@ func normalizeAsset(asset Asset) (Asset, error) {
 	asset.Status = strings.TrimSpace(asset.Status)
 	asset.ImageURL = strings.TrimSpace(asset.ImageURL)
 	asset.ImageB64JSON = strings.TrimSpace(asset.ImageB64JSON)
+	asset.Filename = filepath.Base(strings.TrimSpace(asset.Filename))
+	if asset.Filename == "." {
+		asset.Filename = ""
+	}
+	if asset.Filename == "" {
+		asset.Filename = FilenameFromImageURL(asset.ImageURL)
+	}
+	asset.MIMEType = DetectImageMIME(nil, asset.MIMEType, asset.Filename)
+	asset.SHA256 = strings.ToLower(strings.TrimSpace(asset.SHA256))
+	asset.StorageKind = strings.ToLower(strings.TrimSpace(asset.StorageKind))
+	if asset.StorageKind == "" && asset.Filename != "" {
+		asset.StorageKind = "local"
+	}
+	asset.SourceKind = strings.ToLower(strings.TrimSpace(asset.SourceKind))
+	if asset.SourceKind == "" && asset.Filename != "" {
+		asset.SourceKind = sourceKindFromFilename(asset.Filename)
+	}
+	asset.OriginalURL = strings.TrimSpace(asset.OriginalURL)
 	asset.FileID = strings.TrimSpace(asset.FileID)
 	asset.GenID = strings.TrimSpace(asset.GenID)
 	asset.SourceAccountID = strings.TrimSpace(asset.SourceAccountID)
