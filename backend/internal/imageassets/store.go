@@ -196,6 +196,10 @@ func (s *Store) init() error {
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_category ON image_assets(category);`,
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_favorite ON image_assets(favorite, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_image_asset_tags_tag ON image_asset_tags(tag);`,
+		`CREATE TABLE IF NOT EXISTS image_asset_deletions (
+			asset_id TEXT PRIMARY KEY,
+			deleted_at TEXT NOT NULL DEFAULT ''
+		);`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS image_assets_fts USING fts5(
 			asset_id UNINDEXED,
 			title,
@@ -705,6 +709,15 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 	if err != nil {
 		return nil, err
 	}
+	if shouldRespectAssetDeletion(normalized) {
+		deleted, err := s.deletedIDs(ctx, []string{normalized.ID})
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := deleted[normalized.ID]; ok {
+			return nil, nil
+		}
+	}
 	if current, err := s.Get(ctx, normalized.ID); err == nil && current != nil {
 		if normalized.Category == "" {
 			normalized.Category = current.Category
@@ -750,8 +763,33 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 
 func (s *Store) SaveMany(ctx context.Context, items []Asset) ([]Asset, error) {
 	result := make([]Asset, 0, len(items))
+	skipDeleted := map[string]struct{}{}
+	idsToCheck := []string{}
 	for _, item := range items {
-		saved, err := s.Save(ctx, item)
+		normalized, err := normalizeAsset(item)
+		if err != nil {
+			return nil, err
+		}
+		if shouldRespectAssetDeletion(normalized) {
+			idsToCheck = append(idsToCheck, normalized.ID)
+		}
+	}
+	if len(idsToCheck) > 0 {
+		var err error
+		skipDeleted, err = s.deletedIDs(ctx, idsToCheck)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, item := range items {
+		normalized, err := normalizeAsset(item)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := skipDeleted[normalized.ID]; ok {
+			continue
+		}
+		saved, err := s.Save(ctx, normalized)
 		if err != nil {
 			return nil, err
 		}
@@ -814,6 +852,77 @@ func (s *Store) UpdateMetadataBatch(ctx context.Context, patch BulkMetadataPatch
 	return result, nil
 }
 
+func (s *Store) Delete(ctx context.Context, id string) (*Asset, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("asset store is unavailable")
+	}
+	cleanedID := cleanID(id)
+	if cleanedID == "" {
+		return nil, fmt.Errorf("asset id is required")
+	}
+	current, err := s.Get(ctx, cleanedID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("asset not found")
+	}
+	if err := s.deleteAsset(ctx, *current, shouldRememberAssetDeletion(*current)); err != nil {
+		return nil, err
+	}
+	return current, nil
+}
+
+func (s *Store) DeleteBatch(ctx context.Context, ids []string) ([]Asset, error) {
+	normalizedIDs := normalizeIDs(ids)
+	if len(normalizedIDs) == 0 {
+		return nil, fmt.Errorf("asset ids are required")
+	}
+	result := make([]Asset, 0, len(normalizedIDs))
+	for _, id := range normalizedIDs {
+		item, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if item == nil {
+			return nil, fmt.Errorf("asset not found")
+		}
+		result = append(result, *item)
+	}
+	for _, item := range result {
+		if err := s.deleteAsset(ctx, item, shouldRememberAssetDeletion(item)); err != nil {
+			return nil, err
+		}
+	}
+	sortAssets(result)
+	return result, nil
+}
+
+func (s *Store) DeleteExisting(ctx context.Context, ids []string) ([]Asset, error) {
+	normalizedIDs := normalizeIDs(ids)
+	if len(normalizedIDs) == 0 {
+		return []Asset{}, nil
+	}
+	result := make([]Asset, 0, len(normalizedIDs))
+	for _, id := range normalizedIDs {
+		item, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if item == nil {
+			continue
+		}
+		result = append(result, *item)
+	}
+	for _, item := range result {
+		if err := s.deleteAsset(ctx, item, shouldRememberAssetDeletion(item)); err != nil {
+			return nil, err
+		}
+	}
+	sortAssets(result)
+	return result, nil
+}
+
 func (s *Store) DeleteAutoAsset(ctx context.Context, options DeleteAutoOptions) error {
 	if s == nil || s.db == nil {
 		return nil
@@ -860,6 +969,66 @@ func (s *Store) DeleteAutoAssets(ctx context.Context, options []DeleteAutoOption
 		}
 	}
 	return nil
+}
+
+func (s *Store) deletedIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	if s == nil || s.db == nil || len(ids) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	result := map[string]struct{}{}
+	for _, id := range normalizeIDs(ids) {
+		var assetID string
+		err := s.db.QueryRowContext(ctx, `SELECT asset_id FROM image_asset_deletions WHERE asset_id = ?`, id).Scan(&assetID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result[assetID] = struct{}{}
+	}
+	return result, nil
+}
+
+func (s *Store) deleteAsset(ctx context.Context, asset Asset, rememberDeletion bool) (err error) {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("asset store is unavailable")
+	}
+	cleanedID := cleanID(asset.ID)
+	if cleanedID == "" {
+		return fmt.Errorf("asset id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM image_asset_tags WHERE asset_id = ?`, cleanedID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM image_assets_fts WHERE asset_id = ?`, cleanedID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM image_assets WHERE id = ?`, cleanedID); err != nil {
+		return err
+	}
+	if rememberDeletion {
+		if _, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO image_asset_deletions(asset_id, deleted_at) VALUES(?, ?)
+			 ON CONFLICT(asset_id) DO UPDATE SET deleted_at = excluded.deleted_at`,
+			cleanedID,
+			time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ReferencedFiles(ctx context.Context) (map[string]struct{}, error) {
@@ -1351,6 +1520,19 @@ func filenameFromAssetURL(raw string) string {
 		return filepath.Base(trimmed[index+len("/v1/files/image/"):])
 	}
 	return ""
+}
+
+func shouldRememberAssetDeletion(asset Asset) bool {
+	return strings.TrimSpace(asset.ConversationID) != "" ||
+		strings.TrimSpace(asset.TurnID) != "" ||
+		strings.TrimSpace(asset.ImageID) != ""
+}
+
+func shouldRespectAssetDeletion(asset Asset) bool {
+	if strings.TrimSpace(asset.SourceKind) == "import" || strings.TrimSpace(asset.Mode) == "import" {
+		return false
+	}
+	return shouldRememberAssetDeletion(asset)
 }
 
 func boolToInt(value bool) int {

@@ -977,6 +977,273 @@ func TestHandleImportImageAssetsRejectsNonImage(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteImageAssetKeepsSourceFileByDefault(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+	imageDir := cfg.ResolvePath(cfg.Storage.ImageDir)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imageDir) returned error: %v", err)
+	}
+	filename := "result-delete-default.png"
+	if err := os.WriteFile(filepath.Join(imageDir, filename), pngTestImageBytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile(image) returned error: %v", err)
+	}
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	_, err = store.Save(context.Background(), imageassets.Asset{
+		ID:             "asset-delete-default",
+		Title:          "Delete default",
+		Mode:           "generate",
+		Model:          "gpt-image-2",
+		CreatedAt:      "2026-05-18T08:00:00Z",
+		Status:         "success",
+		ImageURL:       imageassets.ImageFileURL(filename),
+		Filename:       filename,
+		StorageKind:    "local",
+		ConversationID: "conv-delete-default",
+		TurnID:         "turn-delete-default",
+		ImageID:        "img-delete-default",
+	})
+	if err != nil {
+		t.Fatalf("Save(asset) returned error: %v", err)
+	}
+	_ = store.Close()
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/image/assets/asset-delete-default", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		DeletedFile bool `json:"deletedFile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.DeletedFile {
+		t.Fatalf("deletedFile = true, want false")
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, filename)); err != nil {
+		t.Fatalf("expected source file to remain: %v", err)
+	}
+	store, err = imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) after delete returned error: %v", err)
+	}
+	defer store.Close()
+	item, err := store.Get(context.Background(), "asset-delete-default")
+	if err != nil {
+		t.Fatalf("Get(deleted asset) returned error: %v", err)
+	}
+	if item != nil {
+		t.Fatalf("deleted asset = %#v, want nil", item)
+	}
+	if saved, err := store.Save(context.Background(), imageassets.Asset{
+		ID:             "asset-delete-default",
+		Title:          "Resynced",
+		Mode:           "generate",
+		Model:          "gpt-image-2",
+		CreatedAt:      "2026-05-18T08:00:00Z",
+		Status:         "success",
+		ImageURL:       imageassets.ImageFileURL(filename),
+		Filename:       filename,
+		ConversationID: "conv-delete-default",
+		TurnID:         "turn-delete-default",
+		ImageID:        "img-delete-default",
+	}); err != nil || saved != nil {
+		t.Fatalf("Save(deleted history asset) = %#v, %v; want skipped nil", saved, err)
+	}
+}
+
+func TestHandleDeleteImageAssetCanRemoveUnreferencedSourceFile(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+	imageDir := cfg.ResolvePath(cfg.Storage.ImageDir)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imageDir) returned error: %v", err)
+	}
+	filename := "import-delete-source.png"
+	if err := os.WriteFile(filepath.Join(imageDir, filename), pngTestImageBytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile(image) returned error: %v", err)
+	}
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	_, err = store.Save(context.Background(), imageassets.Asset{
+		ID:          "asset-delete-source",
+		Title:       "Delete source",
+		Mode:        "import",
+		Model:       "external",
+		CreatedAt:   "2026-05-18T08:00:00Z",
+		Status:      "success",
+		ImageURL:    imageassets.ImageFileURL(filename),
+		Filename:    filename,
+		StorageKind: "local",
+		SourceKind:  "import",
+	})
+	if err != nil {
+		t.Fatalf("Save(asset) returned error: %v", err)
+	}
+	_ = store.Close()
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/image/assets/asset-delete-source?delete_file=true", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		DeletedFile bool `json:"deletedFile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if !payload.DeletedFile {
+		t.Fatalf("deletedFile = false, want true")
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, filename)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source file stat err = %v, want not exist", err)
+	}
+}
+
+func TestHandleCleanupImageAssetsScansAndCleansOrphansAndMissingRecords(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+	imageDir := cfg.ResolvePath(cfg.Storage.ImageDir)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imageDir) returned error: %v", err)
+	}
+	referencedFile := "referenced-cleanup.png"
+	orphanFile := "orphan-cleanup.png"
+	missingFile := "missing-cleanup.png"
+	for _, filename := range []string{referencedFile, orphanFile} {
+		if err := os.WriteFile(filepath.Join(imageDir, filename), pngTestImageBytes(), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) returned error: %v", filename, err)
+		}
+	}
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	for _, item := range []imageassets.Asset{
+		{
+			ID:          "asset-cleanup-referenced",
+			Title:       "Referenced",
+			Mode:        "import",
+			Model:       "external",
+			CreatedAt:   "2026-05-18T08:00:00Z",
+			Status:      "success",
+			ImageURL:    imageassets.ImageFileURL(referencedFile),
+			Filename:    referencedFile,
+			StorageKind: "local",
+			SourceKind:  "import",
+		},
+		{
+			ID:          "asset-cleanup-missing",
+			Title:       "Missing",
+			Mode:        "import",
+			Model:       "external",
+			CreatedAt:   "2026-05-18T08:00:01Z",
+			Status:      "success",
+			ImageURL:    imageassets.ImageFileURL(missingFile),
+			Filename:    missingFile,
+			StorageKind: "local",
+			SourceKind:  "import",
+		},
+	} {
+		if _, err := store.Save(context.Background(), item); err != nil {
+			t.Fatalf("Save(%s) returned error: %v", item.ID, err)
+		}
+	}
+	_ = store.Close()
+
+	server := NewServer(cfg, nil, nil)
+	scanReq := httptest.NewRequest(http.MethodPost, "/api/image/assets/cleanup", strings.NewReader(`{"dryRun":true}`))
+	scanReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	scanReq.Header.Set("Content-Type", "application/json")
+	scanRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(scanRec, scanReq)
+
+	if scanRec.Code != http.StatusOK {
+		t.Fatalf("scan status = %d, body = %s", scanRec.Code, scanRec.Body.String())
+	}
+	var scanPayload imageAssetCleanupResult
+	if err := json.Unmarshal(scanRec.Body.Bytes(), &scanPayload); err != nil {
+		t.Fatalf("Unmarshal(scan) returned error: %v", err)
+	}
+	if len(scanPayload.OrphanFiles) != 1 || scanPayload.OrphanFiles[0].Filename != orphanFile {
+		t.Fatalf("orphan files = %#v, want %s", scanPayload.OrphanFiles, orphanFile)
+	}
+	if len(scanPayload.MissingAssets) != 1 || scanPayload.MissingAssets[0].ID != "asset-cleanup-missing" {
+		t.Fatalf("missing assets = %#v, want asset-cleanup-missing", scanPayload.MissingAssets)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, orphanFile)); err != nil {
+		t.Fatalf("dry-run removed orphan file: %v", err)
+	}
+
+	cleanReq := httptest.NewRequest(http.MethodPost, "/api/image/assets/cleanup", strings.NewReader(`{"dryRun":false}`))
+	cleanReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	cleanReq.Header.Set("Content-Type", "application/json")
+	cleanRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(cleanRec, cleanReq)
+
+	if cleanRec.Code != http.StatusOK {
+		t.Fatalf("clean status = %d, body = %s", cleanRec.Code, cleanRec.Body.String())
+	}
+	var cleanPayload imageAssetCleanupResult
+	if err := json.Unmarshal(cleanRec.Body.Bytes(), &cleanPayload); err != nil {
+		t.Fatalf("Unmarshal(clean) returned error: %v", err)
+	}
+	if len(cleanPayload.RemovedFiles) != 1 || cleanPayload.RemovedFiles[0] != orphanFile {
+		t.Fatalf("removed files = %#v, want %s", cleanPayload.RemovedFiles, orphanFile)
+	}
+	if len(cleanPayload.RemovedAssetIDs) != 1 || cleanPayload.RemovedAssetIDs[0] != "asset-cleanup-missing" {
+		t.Fatalf("removed asset ids = %#v, want asset-cleanup-missing", cleanPayload.RemovedAssetIDs)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, orphanFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan file stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, referencedFile)); err != nil {
+		t.Fatalf("referenced file should remain: %v", err)
+	}
+	store, err = imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) after cleanup returned error: %v", err)
+	}
+	defer store.Close()
+	if item, err := store.Get(context.Background(), "asset-cleanup-missing"); err != nil || item != nil {
+		t.Fatalf("Get(missing asset) = %#v, %v; want nil", item, err)
+	}
+	if item, err := store.Get(context.Background(), "asset-cleanup-referenced"); err != nil || item == nil {
+		t.Fatalf("Get(referenced asset) = %#v, %v; want item", item, err)
+	}
+}
+
 func TestConfiguredImageModeTreatsLegacyMixAsStudio(t *testing.T) {
 	server := &Server{
 		cfg: &config.Config{

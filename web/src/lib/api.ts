@@ -455,6 +455,29 @@ export type ImageAssetImportResponse = {
   }>;
 };
 
+export type DeleteImageAssetResponse = {
+  ok: boolean;
+  item?: ImageAsset;
+  deletedFile?: boolean;
+};
+
+export type DeleteImageAssetsBulkResponse = {
+  ok: boolean;
+  items: ImageAsset[];
+  deletedFiles?: string[];
+};
+
+export type ImageAssetCleanupResponse = {
+  dryRun: boolean;
+  orphanFiles: Array<{
+    filename: string;
+    path?: string;
+  }>;
+  missingAssets: ImageAsset[];
+  removedFiles: string[];
+  removedAssetIds: string[];
+};
+
 export type ImageAssetTagStat = {
   tag: string;
   count: number;
@@ -904,6 +927,46 @@ export async function importImageAssets(
   return httpRequest<ImageAssetImportResponse>("/api/image/assets/import", {
     method: "POST",
     body: formData,
+  });
+}
+
+export async function deleteImageAsset(
+  id: string,
+  options: {
+    deleteFile?: boolean;
+  } = {},
+) {
+  const params = new URLSearchParams();
+  if (options.deleteFile) {
+    params.set("delete_file", "true");
+  }
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  return httpRequest<DeleteImageAssetResponse>(
+    `/api/image/assets/${encodeURIComponent(id)}${suffix}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function deleteImageAssetsBulk(payload: {
+  ids: string[];
+  deleteFile?: boolean;
+}) {
+  return httpRequest<DeleteImageAssetsBulkResponse>("/api/image/assets", {
+    method: "DELETE",
+    body: payload,
+  });
+}
+
+export async function cleanupImageAssets(payload: {
+  dryRun?: boolean;
+  removeOrphanFiles?: boolean;
+  removeMissingFileAssets?: boolean;
+}) {
+  return httpRequest<ImageAssetCleanupResponse>("/api/image/assets/cleanup", {
+    method: "POST",
+    body: payload,
   });
 }
 

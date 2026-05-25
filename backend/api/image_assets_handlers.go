@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -57,6 +61,19 @@ type imageAssetCategoryStatView struct {
 type imageAssetImportFailureView struct {
 	Name  string `json:"name"`
 	Error string `json:"error"`
+}
+
+type imageAssetCleanupFileView struct {
+	Filename string `json:"filename"`
+	Path     string `json:"path,omitempty"`
+}
+
+type imageAssetCleanupResult struct {
+	DryRun          bool                        `json:"dryRun"`
+	OrphanFiles     []imageAssetCleanupFileView `json:"orphanFiles"`
+	MissingAssets   []imageAssetView            `json:"missingAssets"`
+	RemovedFiles    []string                    `json:"removedFiles"`
+	RemovedAssetIDs []string                    `json:"removedAssetIds"`
 }
 
 func (s *Server) handleListImageAssets(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +195,270 @@ func (s *Server) handleBulkUpdateImageAssets(w http.ResponseWriter, r *http.Requ
 		result = append(result, buildImageAssetView(item))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *Server) handleDeleteImageAsset(w http.ResponseWriter, r *http.Request) {
+	store, err := imageassets.NewStore(s.cfg.RootDir())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	defer store.Close()
+
+	item, err := store.Delete(r.Context(), r.PathValue("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			status = http.StatusNotFound
+		} else if strings.Contains(strings.ToLower(err.Error()), "required") {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]any{"error": err.Error()})
+		return
+	}
+
+	deletedFile := false
+	if parseImageAssetBoolQuery(r, "delete_file") {
+		removed, err := s.deleteImageAssetFilesIfUnreferenced(r.Context(), store, []imageassets.Asset{*item})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		deletedFile = len(removed) > 0
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"item":        buildImageAssetView(*item),
+		"deletedFile": deletedFile,
+	})
+}
+
+func (s *Server) handleBulkDeleteImageAssets(w http.ResponseWriter, r *http.Request) {
+	store, err := imageassets.NewStore(s.cfg.RootDir())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	defer store.Close()
+
+	var body struct {
+		IDs        []string `json:"ids"`
+		DeleteFile bool     `json:"deleteFile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		return
+	}
+
+	items, err := store.DeleteBatch(r.Context(), body.IDs)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]any{"error": err.Error()})
+		return
+	}
+
+	deletedFiles := []string{}
+	if body.DeleteFile {
+		deletedFiles, err = s.deleteImageAssetFilesIfUnreferenced(r.Context(), store, items)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
+
+	result := make([]imageAssetView, 0, len(items))
+	for _, item := range items {
+		result = append(result, buildImageAssetView(item))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"items":        result,
+		"deletedFiles": deletedFiles,
+	})
+}
+
+func (s *Server) deleteImageAssetFilesIfUnreferenced(ctx context.Context, store *imageassets.Store, items []imageassets.Asset) ([]string, error) {
+	if len(items) == 0 {
+		return []string{}, nil
+	}
+	referenced, err := store.ReferencedFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	candidates := map[string]struct{}{}
+	for _, item := range items {
+		filename := imageAssetFilename(item)
+		if filename == "" {
+			continue
+		}
+		if _, stillUsed := referenced[filename]; stillUsed {
+			continue
+		}
+		candidates[filename] = struct{}{}
+	}
+	return s.removeImageAssetFiles(candidates)
+}
+
+func (s *Server) cleanupImageAssets(
+	ctx context.Context,
+	store *imageassets.Store,
+	dryRun bool,
+	removeOrphanFiles bool,
+	removeMissingFileAssets bool,
+) (imageAssetCleanupResult, error) {
+	result := imageAssetCleanupResult{
+		DryRun:          dryRun,
+		OrphanFiles:     []imageAssetCleanupFileView{},
+		MissingAssets:   []imageAssetView{},
+		RemovedFiles:    []string{},
+		RemovedAssetIDs: []string{},
+	}
+	items, err := store.List(ctx)
+	if err != nil {
+		return result, err
+	}
+	referenced := map[string]struct{}{}
+	for _, item := range items {
+		filename := imageAssetFilename(item)
+		if filename != "" {
+			referenced[filename] = struct{}{}
+		}
+		if removeMissingFileAssets && filename != "" && !s.imageAssetFileExists(filename) {
+			result.MissingAssets = append(result.MissingAssets, buildImageAssetView(item))
+		}
+	}
+	if removeOrphanFiles {
+		orphans, err := s.findOrphanImageAssetFiles(referenced)
+		if err != nil {
+			return result, err
+		}
+		result.OrphanFiles = orphans
+	}
+	if dryRun {
+		return result, nil
+	}
+	if removeOrphanFiles {
+		filesToRemove := map[string]struct{}{}
+		for _, item := range result.OrphanFiles {
+			filesToRemove[item.Filename] = struct{}{}
+		}
+		removed, err := s.removeImageAssetFiles(filesToRemove)
+		if err != nil {
+			return result, err
+		}
+		result.RemovedFiles = removed
+	}
+	if removeMissingFileAssets {
+		ids := make([]string, 0, len(result.MissingAssets))
+		for _, item := range result.MissingAssets {
+			ids = append(ids, item.ID)
+		}
+		removedItems, err := store.DeleteExisting(ctx, ids)
+		if err != nil {
+			return result, err
+		}
+		for _, item := range removedItems {
+			result.RemovedAssetIDs = append(result.RemovedAssetIDs, item.ID)
+		}
+		sort.Strings(result.RemovedAssetIDs)
+	}
+	return result, nil
+}
+
+func (s *Server) findOrphanImageAssetFiles(referenced map[string]struct{}) ([]imageAssetCleanupFileView, error) {
+	result := []imageAssetCleanupFileView{}
+	seen := map[string]struct{}{}
+	for _, dir := range s.imageAssetCandidateDirs() {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			filename := filepath.Base(entry.Name())
+			if filename == "." || filename == "" || !isImageAssetFilename(filename) {
+				continue
+			}
+			if _, ok := referenced[filename]; ok {
+				continue
+			}
+			path := filepath.Join(dir, filename)
+			cleanPath := filepath.Clean(path)
+			if _, ok := seen[cleanPath]; ok {
+				continue
+			}
+			seen[cleanPath] = struct{}{}
+			result = append(result, imageAssetCleanupFileView{Filename: filename, Path: cleanPath})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Filename == result[j].Filename {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].Filename < result[j].Filename
+	})
+	return result, nil
+}
+
+func (s *Server) removeImageAssetFiles(files map[string]struct{}) ([]string, error) {
+	if len(files) == 0 {
+		return []string{}, nil
+	}
+	removed := []string{}
+	seenRemoved := map[string]struct{}{}
+	for filename := range files {
+		base := filepath.Base(strings.TrimSpace(filename))
+		if base == "" || base == "." {
+			continue
+		}
+		for _, dir := range s.imageAssetCandidateDirs() {
+			path := filepath.Join(dir, base)
+			if err := os.Remove(path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, err
+			}
+			if _, ok := seenRemoved[base]; ok {
+				continue
+			}
+			seenRemoved[base] = struct{}{}
+			removed = append(removed, base)
+		}
+	}
+	sort.Strings(removed)
+	return removed, nil
+}
+
+func (s *Server) imageAssetFileExists(filename string) bool {
+	base := filepath.Base(strings.TrimSpace(filename))
+	if base == "" || base == "." {
+		return false
+	}
+	for _, dir := range s.imageAssetCandidateDirs() {
+		info, err := os.Stat(filepath.Join(dir, base))
+		if err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) imageAssetCandidateDirs() []string {
+	if s == nil || s.cfg == nil {
+		return []string{}
+	}
+	primaryDir := s.cfg.ResolvePath(s.cfg.Storage.ImageDir)
+	return imageassets.CandidateImageDirs(s.cfg.RootDir(), primaryDir)
 }
 
 func (s *Server) handleImportImageAssets(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +591,48 @@ func (s *Server) handleImageAssetStats(w http.ResponseWriter, r *http.Request) {
 		"tags":       tagItems,
 		"categories": categoryItems,
 	})
+}
+
+func (s *Server) handleCleanupImageAssets(w http.ResponseWriter, r *http.Request) {
+	store, err := imageassets.NewStore(s.cfg.RootDir())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	defer store.Close()
+
+	var body struct {
+		DryRun                  *bool `json:"dryRun"`
+		RemoveOrphanFiles       *bool `json:"removeOrphanFiles"`
+		RemoveMissingFileAssets *bool `json:"removeMissingFileAssets"`
+	}
+	if r.Body != nil {
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+			return
+		}
+	}
+
+	dryRun := true
+	if body.DryRun != nil {
+		dryRun = *body.DryRun
+	}
+	removeOrphanFiles := true
+	if body.RemoveOrphanFiles != nil {
+		removeOrphanFiles = *body.RemoveOrphanFiles
+	}
+	removeMissingFileAssets := true
+	if body.RemoveMissingFileAssets != nil {
+		removeMissingFileAssets = *body.RemoveMissingFileAssets
+	}
+
+	result, err := s.cleanupImageAssets(r.Context(), store, dryRun, removeOrphanFiles, removeMissingFileAssets)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleManageImageAssetTags(w http.ResponseWriter, r *http.Request) {
@@ -591,6 +914,23 @@ func normalizeImageAssetURL(raw string) string {
 	return trimmed
 }
 
+func imageAssetFilename(item imageassets.Asset) string {
+	if filename := filepath.Base(strings.TrimSpace(item.Filename)); filename != "" && filename != "." {
+		return filename
+	}
+	return imageassets.FilenameFromImageURL(item.ImageURL)
+}
+
+func isImageAssetFilename(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(filename)))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
 func mapKeys(values map[string]struct{}) []string {
 	items := make([]string, 0, len(values))
 	for value := range values {
@@ -600,6 +940,14 @@ func mapKeys(values map[string]struct{}) []string {
 	}
 	sort.Strings(items)
 	return items
+}
+
+func parseImageAssetBoolQuery(r *http.Request, key string) bool {
+	if r == nil {
+		return false
+	}
+	raw := strings.TrimSpace(strings.ToLower(r.URL.Query().Get(key)))
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 }
 
 func parseImageAssetIntQuery(r *http.Request, key string, fallback int) int {

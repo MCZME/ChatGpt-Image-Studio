@@ -7,6 +7,7 @@ import {
   Database,
   Heart,
   LoaderCircle,
+  Trash2,
   Upload,
   Search,
   Square,
@@ -26,11 +27,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { fetchImageAssetStats, type ImageAsset } from "@/lib/api";
 import {
+  deleteUnifiedImageAsset,
+  deleteUnifiedImageAssetsBulk,
   listUnifiedImageAssets,
   importUnifiedImageAssets,
   updateUnifiedImageAsset,
@@ -155,6 +159,17 @@ type AssetStorageDetail = {
   url?: string;
 };
 
+type DeleteDialogState =
+  | {
+      mode: "single";
+      asset: ImageAsset;
+    }
+  | {
+      mode: "bulk";
+      ids: string[];
+      count: number;
+    };
+
 function mergeAssetsById(current: ImageAsset[], incoming: ImageAsset[]) {
   const map = new Map(current.map((item) => [item.id, item] as const));
   for (const item of incoming) {
@@ -184,10 +199,14 @@ export default function ImagesPage() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextOffset, setNextOffset] = useState(0);
   const [total, setTotal] = useState(0);
+  const [deleteDialogState, setDeleteDialogState] =
+    useState<DeleteDialogState | null>(null);
+  const [deleteFileToo, setDeleteFileToo] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const nextOffsetRef = useRef(0);
@@ -308,6 +327,12 @@ export default function ImagesPage() {
   }, [items]);
 
   useEffect(() => {
+    if (!deleteDialogState) {
+      setDeleteFileToo(false);
+    }
+  }, [deleteDialogState]);
+
+  useEffect(() => {
     const node = loadMoreRef.current;
     if (!node || !hasMore || isLoading || isLoadingMore) {
       return;
@@ -404,6 +429,75 @@ export default function ImagesPage() {
       toast.error(error instanceof Error ? error.message : "批量更新失败");
     } finally {
       setIsBulkSaving(false);
+    }
+  };
+
+  const openSingleDeleteDialog = (asset: ImageAsset) => {
+    setDeleteDialogState({
+      mode: "single",
+      asset,
+    });
+  };
+
+  const openBulkDeleteDialog = () => {
+    if (selectedAssetIds.length === 0) {
+      toast.warning("请先选择图片");
+      return;
+    }
+    setDeleteDialogState({
+      mode: "bulk",
+      ids: selectedAssetIds,
+      count: selectedAssetIds.length,
+    });
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteDialogState) {
+      return;
+    }
+    setIsDeleting(true);
+    try {
+      if (deleteDialogState.mode === "single") {
+        const asset = deleteDialogState.asset;
+        const result = await deleteUnifiedImageAsset(asset.id, {
+          deleteFile: deleteFileToo,
+        });
+        const deletedFile = deleteFileToo && result.deletedFile;
+        toast.success(deletedFile ? "图片和源文件已删除" : "图片记录已删除");
+        setItems((current) => current.filter((item) => item.id !== asset.id));
+        setSelectedAssetIds((current) => current.filter((id) => id !== asset.id));
+        if (selectedAsset?.id === asset.id) {
+          setSelectedAsset(null);
+        }
+      } else {
+        const result = await deleteUnifiedImageAssetsBulk({
+          ids: deleteDialogState.ids,
+          deleteFile: deleteFileToo,
+        });
+        const deletedCount = result.items.length || deleteDialogState.count;
+        const deletedFilesCount = result.deletedFiles?.length ?? 0;
+        toast.success(
+          deleteFileToo
+            ? `已删除 ${deletedCount} 条记录，清理 ${deletedFilesCount} 个文件`
+            : `已删除 ${deletedCount} 条图片记录`,
+        );
+        const deletedIdSet = new Set(deleteDialogState.ids);
+        setItems((current) =>
+          current.filter((item) => !deletedIdSet.has(item.id)),
+        );
+        setSelectedAssetIds((current) =>
+          current.filter((id) => !deletedIdSet.has(id)),
+        );
+        if (selectedAsset && deletedIdSet.has(selectedAsset.id)) {
+          setSelectedAsset(null);
+        }
+      }
+      setDeleteDialogState(null);
+      await refreshAssets("reset");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除失败");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -591,6 +685,21 @@ export default function ImagesPage() {
 
             <Button
               type="button"
+              variant="outline"
+              className="rounded-full border-rose-200 bg-white text-rose-600 hover:bg-rose-50"
+              onClick={openBulkDeleteDialog}
+              disabled={selectedAssetIds.length === 0 || isDeleting}
+            >
+              {isDeleting && deleteDialogState?.mode === "bulk" ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              批量删除
+            </Button>
+
+            <Button
+              type="button"
               className="rounded-full bg-stone-950 text-white hover:bg-stone-800"
               onClick={() => void handleBulkSave()}
               disabled={selectedAssetIds.length === 0 || isBulkSaving}
@@ -722,6 +831,18 @@ export default function ImagesPage() {
                             ) : (
                               <Square className="size-4" />
                             )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openSingleDeleteDialog(asset);
+                            }}
+                            className="absolute bottom-3 right-3 inline-flex size-10 items-center justify-center rounded-full border border-white/70 bg-black/35 text-white backdrop-blur transition hover:bg-rose-500/85"
+                            aria-label="删除图片"
+                            title="删除图片"
+                          >
+                            <Trash2 className="size-4" />
                           </button>
                         </div>
 
@@ -943,6 +1064,15 @@ export default function ImagesPage() {
                   <Button
                     type="button"
                     variant="outline"
+                    className="rounded-full border-rose-200 text-rose-600 hover:bg-rose-50"
+                    onClick={() => openSingleDeleteDialog(selectedAsset)}
+                  >
+                    <Trash2 className="size-4" />
+                    删除图片
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
                     className="rounded-full border-stone-200"
                     onClick={() =>
                       void handleToggleFavorite({
@@ -972,6 +1102,74 @@ export default function ImagesPage() {
                   </Button>
                 </DialogFooter>
               </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleteDialogState)}
+        onOpenChange={(open) => {
+          if (!open && !isDeleting) {
+            setDeleteDialogState(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[460px] rounded-[28px] border-stone-200 bg-white p-0 dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)]">
+          {deleteDialogState ? (
+            <div className="p-6">
+              <DialogHeader>
+                <DialogTitle>
+                  {deleteDialogState.mode === "single" ? "删除图片" : "批量删除图片"}
+                </DialogTitle>
+                <DialogDescription>
+                  {deleteDialogState.mode === "single"
+                    ? "默认只删除图库记录。"
+                    : `将删除 ${deleteDialogState.count} 条图库记录。`}
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="mt-5 space-y-4">
+                <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700 dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel)] dark:text-[var(--studio-text)]">
+                  {deleteDialogState.mode === "single"
+                    ? deleteDialogState.asset.title || "未命名图片"
+                    : `已选择 ${deleteDialogState.count} 张图片`}
+                </div>
+
+                <label className="flex items-start gap-3 rounded-[22px] border border-rose-200/70 bg-rose-50/70 px-4 py-3 text-sm text-stone-700 dark:border-rose-900/50 dark:bg-rose-950/10 dark:text-[var(--studio-text)]">
+                  <Checkbox
+                    checked={deleteFileToo}
+                    onCheckedChange={(checked) => setDeleteFileToo(Boolean(checked))}
+                    className="mt-0.5"
+                  />
+                  <span className="leading-6">同时删除源文件</span>
+                </label>
+              </div>
+
+              <DialogFooter className="mt-6">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-full border-stone-200"
+                  onClick={() => setDeleteDialogState(null)}
+                  disabled={isDeleting}
+                >
+                  取消
+                </Button>
+                <Button
+                  type="button"
+                  className="rounded-full bg-rose-600 text-white hover:bg-rose-500"
+                  onClick={() => void handleConfirmDelete()}
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
+                  确认删除
+                </Button>
+              </DialogFooter>
             </div>
           ) : null}
         </DialogContent>

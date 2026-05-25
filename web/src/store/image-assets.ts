@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  deleteImageAsset as deleteServerImageAsset,
+  deleteImageAssetsBulk as deleteServerImageAssetsBulk,
   fetchConfig,
   importImageAssets as importServerImageAssets,
   listImageAssets as listServerImageAssets,
@@ -154,4 +156,20 @@ export async function updateUnifiedImageAssetsBulk(payload: {
   favorite?: boolean;
 }) {
   return updateServerImageAssetsBulk(payload);
+}
+
+export async function deleteUnifiedImageAsset(
+  id: string,
+  options: {
+    deleteFile?: boolean;
+  } = {},
+) {
+  return deleteServerImageAsset(id, options);
+}
+
+export async function deleteUnifiedImageAssetsBulk(payload: {
+  ids: string[];
+  deleteFile?: boolean;
+}) {
+  return deleteServerImageAssetsBulk(payload);
 }
