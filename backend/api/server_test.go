@@ -438,11 +438,131 @@ func TestHandleUpdateImageAssetPersistsMetadata(t *testing.T) {
 	if payload.Item.Category != "海报" {
 		t.Fatalf("category = %q, want %q", payload.Item.Category, "海报")
 	}
+	if payload.Item.Title != "测试图片" {
+		t.Fatalf("title = %q, want %q", payload.Item.Title, "测试图片")
+	}
 	if !payload.Item.Favorite {
 		t.Fatal("favorite = false, want true")
 	}
 	if len(payload.Item.Tags) != 2 {
 		t.Fatalf("tags = %#v, want 2 tags", payload.Item.Tags)
+	}
+}
+
+func TestHandleUpdateImageAssetPersistsTitleAcrossReads(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-title",
+		Title:     "原始标题",
+		Mode:      "generate",
+		Prompt:    "title persistence",
+		Model:     "gpt-image-2",
+		Count:     1,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{
+			{
+				ID:        "turn-title",
+				Title:     "原始标题",
+				Mode:      "generate",
+				Prompt:    "title persistence",
+				Model:     "gpt-image-2",
+				Count:     1,
+				CreatedAt: "2026-05-18T08:00:00Z",
+				Status:    "success",
+				Images: []imagehistory.Image{
+					{ID: "img-title", Status: "success", URL: "/v1/files/image/result-title.png"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+
+	seedReq := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	seedReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	seedRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusOK {
+		t.Fatalf("seed status = %d, body = %s", seedRec.Code, seedRec.Body.String())
+	}
+
+	updateBody := `{"title":"已保存标题"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/image/assets/conv-title::turn-title::img-title", strings.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var updatePayload struct {
+		Item imageAssetView `json:"item"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &updatePayload); err != nil {
+		t.Fatalf("Unmarshal(update) returned error: %v", err)
+	}
+	if updatePayload.Item.Title != "已保存标题" {
+		t.Fatalf("updated title = %q, want %q", updatePayload.Item.Title, "已保存标题")
+	}
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	verifyReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	verifyRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(verifyRec, verifyReq)
+
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("verify status = %d, body = %s", verifyRec.Code, verifyRec.Body.String())
+	}
+
+	var verifyPayload struct {
+		Items []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(verifyRec.Body.Bytes(), &verifyPayload); err != nil {
+		t.Fatalf("Unmarshal(verify) returned error: %v", err)
+	}
+	if len(verifyPayload.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(verifyPayload.Items))
+	}
+	if verifyPayload.Items[0].Title != "已保存标题" {
+		t.Fatalf("persisted title = %q, want %q", verifyPayload.Items[0].Title, "已保存标题")
+	}
+
+	assetStore, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	defer assetStore.Close()
+
+	saved, err := assetStore.Get(context.Background(), "conv-title::turn-title::img-title")
+	if err != nil {
+		t.Fatalf("Get(asset) returned error: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("saved asset = nil, want persisted asset")
+	}
+	if saved.Title != "已保存标题" {
+		t.Fatalf("db title = %q, want %q", saved.Title, "已保存标题")
 	}
 }
 

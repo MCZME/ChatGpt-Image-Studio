@@ -870,6 +870,7 @@ export async function listImageAssets(params?: {
 export async function updateImageAsset(
   id: string,
   payload: {
+    title?: string;
     category?: string;
     tags?: string[];
     note?: string;
@@ -887,6 +888,7 @@ export async function updateImageAsset(
 
 export async function updateImageAssetsBulk(payload: {
   ids: string[];
+  title?: string;
   category?: string;
   tags?: string[];
   note?: string;

@@ -48,6 +48,7 @@ type Asset struct {
 }
 
 type MetadataPatch struct {
+	Title    *string   `json:"title,omitempty"`
 	Category *string   `json:"category,omitempty"`
 	Tags     *[]string `json:"tags,omitempty"`
 	Note     *string   `json:"note,omitempty"`
@@ -56,6 +57,7 @@ type MetadataPatch struct {
 
 type BulkMetadataPatch struct {
 	IDs      []string  `json:"ids"`
+	Title    *string   `json:"title,omitempty"`
 	Category *string   `json:"category,omitempty"`
 	Tags     *[]string `json:"tags,omitempty"`
 	Note     *string   `json:"note,omitempty"`
@@ -719,6 +721,9 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 		}
 	}
 	if current, err := s.Get(ctx, normalized.ID); err == nil && current != nil {
+		if shouldPreserveStoredTitle(normalized, *current) {
+			normalized.Title = current.Title
+		}
 		if normalized.Category == "" {
 			normalized.Category = current.Category
 		}
@@ -759,6 +764,19 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 		return nil, err
 	}
 	return &normalized, nil
+}
+
+func shouldPreserveStoredTitle(incoming, current Asset) bool {
+	if strings.TrimSpace(current.Title) == "" {
+		return false
+	}
+	if strings.TrimSpace(incoming.Title) == "" {
+		return true
+	}
+	if strings.TrimSpace(incoming.Title) == strings.TrimSpace(current.Title) {
+		return false
+	}
+	return incoming.ConversationID != "" && incoming.TurnID != ""
 }
 
 func (s *Store) SaveMany(ctx context.Context, items []Asset) ([]Asset, error) {
@@ -810,6 +828,9 @@ func (s *Store) UpdateMetadata(ctx context.Context, id string, patch MetadataPat
 		return nil, fmt.Errorf("asset not found")
 	}
 	next := *current
+	if patch.Title != nil {
+		next.Title = strings.TrimSpace(*patch.Title)
+	}
 	if patch.Category != nil {
 		next.Category = strings.TrimSpace(*patch.Category)
 	}
@@ -836,6 +857,7 @@ func (s *Store) UpdateMetadataBatch(ctx context.Context, patch BulkMetadataPatch
 	result := make([]Asset, 0, len(ids))
 	for _, id := range ids {
 		item, err := s.UpdateMetadata(ctx, id, MetadataPatch{
+			Title:    patch.Title,
 			Category: patch.Category,
 			Tags:     patch.Tags,
 			Note:     patch.Note,

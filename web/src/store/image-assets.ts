@@ -139,6 +139,7 @@ export async function importUnifiedImageAssets(
 export async function updateUnifiedImageAsset(
   id: string,
   payload: {
+    title?: string;
     category?: string;
     tags?: string[];
     note?: string;
@@ -150,6 +151,7 @@ export async function updateUnifiedImageAsset(
 
 export async function updateUnifiedImageAssetsBulk(payload: {
   ids: string[];
+  title?: string;
   category?: string;
   tags?: string[];
   note?: string;

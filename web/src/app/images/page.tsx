@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckSquare,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Database,
   Heart,
   LoaderCircle,
+  Maximize2,
   Trash2,
   Upload,
   Search,
@@ -188,6 +191,7 @@ export default function ImagesPage() {
   const [selectedSort, setSelectedSort] = useState("created_desc");
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<ImageAsset | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
   const [editingCategory, setEditingCategory] = useState("");
   const [editingTags, setEditingTags] = useState("");
   const [editingNote, setEditingNote] = useState("");
@@ -198,6 +202,7 @@ export default function ImagesPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTitleSaving, setIsTitleSaving] = useState(false);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -207,6 +212,8 @@ export default function ImagesPage() {
   const [deleteDialogState, setDeleteDialogState] =
     useState<DeleteDialogState | null>(null);
   const [deleteFileToo, setDeleteFileToo] = useState(false);
+  const [isPromptExpanded, setIsPromptExpanded] = useState(false);
+  const [isImagePreviewOpen, setIsImagePreviewOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const nextOffsetRef = useRef(0);
@@ -278,11 +285,15 @@ export default function ImagesPage() {
 
   useEffect(() => {
     if (!selectedAsset) {
+      setEditingTitle("");
       setEditingCategory("");
       setEditingTags("");
       setEditingNote("");
+      setIsPromptExpanded(false);
+      setIsImagePreviewOpen(false);
       return;
     }
+    setEditingTitle(selectedAsset.title || "");
     setEditingCategory(selectedAsset.category || "");
     setEditingTags((selectedAsset.tags || []).join(", "));
     setEditingNote(selectedAsset.note || "");
@@ -431,6 +442,43 @@ export default function ImagesPage() {
       setIsBulkSaving(false);
     }
   };
+
+  const handleSaveTitle = async () => {
+    if (!selectedAsset) {
+      return;
+    }
+    const nextTitle = editingTitle.trim();
+    if (!nextTitle) {
+      toast.warning("请输入标题");
+      return;
+    }
+    if (nextTitle === selectedAsset.title) {
+      toast.info("标题没有变化");
+      return;
+    }
+    setIsTitleSaving(true);
+    try {
+      const result = await updateUnifiedImageAsset(selectedAsset.id, {
+        title: nextTitle,
+      });
+      setSelectedAsset(result.item);
+      setItems((current) =>
+        current.map((item) => (item.id === result.item.id ? result.item : item)),
+      );
+      toast.success("标题已更新");
+      await refreshAssets("reset");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "标题保存失败");
+    } finally {
+      setIsTitleSaving(false);
+    }
+  };
+
+  const isTitleDirty = Boolean(
+    selectedAsset && editingTitle.trim() && editingTitle.trim() !== selectedAsset.title,
+  );
+  const promptPreviewText = selectedAsset?.prompt || "";
+  const shouldCollapsePrompt = promptPreviewText.trim().length > 220;
 
   const openSingleDeleteDialog = (asset: ImageAsset) => {
     setDeleteDialogState({
@@ -921,11 +969,27 @@ export default function ImagesPage() {
             <div className="grid max-h-[86vh] grid-cols-1 overflow-hidden lg:grid-cols-[1.1fr_0.9fr]">
               <div className="overflow-auto bg-[#ede5db] p-4 dark:bg-[var(--studio-panel)]">
                 {selectedImageURL ? (
-                  <AppImage
-                    src={selectedImageURL}
-                    alt={selectedAsset.title}
-                    className="mx-auto block max-h-[72vh] w-auto max-w-full rounded-[24px] shadow-[0_20px_55px_-28px_rgba(0,0,0,0.45)]"
-                  />
+                  <div className="space-y-3">
+                    <button
+                      type="button"
+                      onClick={() => setIsImagePreviewOpen(true)}
+                      className="group relative block w-full"
+                      aria-label={`放大查看 ${selectedAsset.title || "图片"}`}
+                    >
+                      <AppImage
+                        src={selectedImageURL}
+                        alt={selectedAsset.title}
+                        className="mx-auto block max-h-[72vh] w-auto max-w-full rounded-[24px] shadow-[0_20px_55px_-28px_rgba(0,0,0,0.45)] transition duration-200 group-hover:shadow-[0_24px_60px_-28px_rgba(0,0,0,0.5)]"
+                      />
+                      <span className="pointer-events-none absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border border-white/70 bg-black/40 px-3 py-1.5 text-xs font-medium text-white backdrop-blur">
+                        <Maximize2 className="size-3.5" />
+                        放大查看
+                      </span>
+                    </button>
+                    <div className="text-center text-xs text-stone-500 dark:text-[var(--studio-text-muted)]">
+                      点击图片可进入放大预览
+                    </div>
+                  </div>
                 ) : (
                   <div className="flex min-h-[320px] items-center justify-center rounded-[24px] bg-white/70 text-sm text-stone-500">
                     图片不可预览
@@ -935,7 +999,35 @@ export default function ImagesPage() {
 
               <div className="hide-scrollbar overflow-y-auto bg-white p-6 dark:bg-[var(--studio-panel-soft)]">
                 <DialogHeader>
-                  <DialogTitle>{selectedAsset.title}</DialogTitle>
+                  <DialogTitle className="sr-only">编辑图片详情</DialogTitle>
+                  <div className="space-y-2">
+                    <label
+                      htmlFor="image-asset-title"
+                      className="block text-xs font-semibold uppercase tracking-[0.2em] text-stone-500"
+                    >
+                      标题
+                    </label>
+                    <div className="flex flex-col gap-3 sm:flex-row">
+                      <Input
+                        id="image-asset-title"
+                        value={editingTitle}
+                        onChange={(event) => setEditingTitle(event.target.value)}
+                        placeholder="请输入图片标题"
+                        className="h-12 rounded-2xl border-stone-200 bg-stone-50 text-base font-semibold shadow-none"
+                      />
+                      <Button
+                        type="button"
+                        className="rounded-full bg-stone-950 text-white hover:bg-stone-800"
+                        onClick={() => void handleSaveTitle()}
+                        disabled={isTitleSaving || !isTitleDirty}
+                      >
+                        {isTitleSaving ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : null}
+                        保存标题
+                      </Button>
+                    </div>
+                  </div>
                   <DialogDescription>
                     {formatAssetTime(selectedAsset.createdAt)} · {selectedAsset.model || "未知模型"}
                   </DialogDescription>
@@ -984,18 +1076,37 @@ export default function ImagesPage() {
                         <div className="text-sm font-medium text-stone-900">提示词</div>
                         <div className="text-xs text-stone-500">保留原始提示词，方便复用</div>
                       </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="rounded-full border-stone-200 bg-white"
-                        onClick={() => void copyText(selectedAsset.prompt, "提示词已复制")}
-                      >
-                        <Copy className="size-4" />
-                        复制
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        {shouldCollapsePrompt ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="rounded-full border-stone-200 bg-white"
+                            onClick={() => setIsPromptExpanded((current) => !current)}
+                          >
+                            {isPromptExpanded ? (
+                              <ChevronUp className="size-4" />
+                            ) : (
+                              <ChevronDown className="size-4" />
+                            )}
+                            {isPromptExpanded ? "收起" : "展开"}
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="rounded-full border-stone-200 bg-white"
+                          onClick={() => void copyText(selectedAsset.prompt, "提示词已复制")}
+                        >
+                          <Copy className="size-4" />
+                          复制
+                        </Button>
+                      </div>
                     </div>
                     <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4 text-sm leading-7 text-stone-700">
-                      {selectedAsset.prompt || "无提示词"}
+                      <p className={cn(!isPromptExpanded && shouldCollapsePrompt && "line-clamp-4")}>
+                        {selectedAsset.prompt || "无提示词"}
+                      </p>
                     </div>
                   </div>
 
@@ -1170,6 +1281,49 @@ export default function ImagesPage() {
                   确认删除
                 </Button>
               </DialogFooter>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isImagePreviewOpen}
+        onOpenChange={(open) => setIsImagePreviewOpen(open)}
+      >
+        <DialogContent className="w-[min(96vw,1240px)] max-w-none overflow-hidden border-stone-200 bg-[#111] p-0 dark:border-[var(--studio-border)]">
+          {selectedAsset ? (
+            <div className="flex max-h-[92vh] flex-col">
+              <div className="flex items-center justify-between gap-4 border-b border-white/10 px-6 py-4 text-white">
+                <div className="min-w-0">
+                  <DialogTitle className="truncate text-base font-semibold text-white">
+                    {selectedAsset.title || "图片预览"}
+                  </DialogTitle>
+                  <DialogDescription className="truncate text-xs text-white/65">
+                    点击弹层外区域或右上角关闭预览
+                  </DialogDescription>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-full border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+                  onClick={() => setIsImagePreviewOpen(false)}
+                >
+                  关闭
+                </Button>
+              </div>
+              <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4 sm:p-6">
+                {selectedImageURL ? (
+                  <AppImage
+                    src={selectedImageURL}
+                    alt={selectedAsset.title}
+                    className="h-auto max-h-full w-auto max-w-full rounded-[24px] object-contain shadow-[0_24px_70px_-32px_rgba(0,0,0,0.75)]"
+                  />
+                ) : (
+                  <div className="flex min-h-[320px] w-full items-center justify-center rounded-[24px] bg-white/5 text-sm text-white/65">
+                    图片不可预览
+                  </div>
+                )}
+              </div>
             </div>
           ) : null}
         </DialogContent>
