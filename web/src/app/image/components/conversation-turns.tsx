@@ -1,7 +1,6 @@
 "use client";
 
 import { memo } from "react";
-import Zoom from "react-medium-image-zoom";
 import {
   Brush,
   Clock3,
@@ -14,7 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { AppImage as Image } from "@/components/app-image";
+import { ZoomableImage } from "@/components/zoomable-image";
 import type { ImageTaskView } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
@@ -89,19 +88,38 @@ async function copyPromptToClipboard(prompt: string) {
     return;
   }
 
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const input = document.createElement("textarea");
-      input.value = text;
-      input.setAttribute("readonly", "");
-      input.style.position = "fixed";
-      input.style.left = "-9999px";
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand("copy");
+  const copyWithTextarea = () => {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.top = "0";
+    input.style.left = "-9999px";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.focus({ preventScroll: true });
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+    try {
+      return document.execCommand("copy");
+    } finally {
       document.body.removeChild(input);
+    }
+  };
+
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast.success("提示词已复制");
+        return;
+      } catch {
+        // The embedded browser can expose Clipboard API but deny writes.
+        // Fall through to the selection-based copy path below.
+      }
+    }
+    if (!copyWithTextarea()) {
+      throw new Error("copy command rejected");
     }
     toast.success("提示词已复制");
   } catch {
@@ -224,16 +242,13 @@ export const ConversationTurns = memo(function ConversationTurns({
                         <div className="border-b border-stone-100 px-3 py-2 text-left text-[11px] font-medium text-stone-500">
                           {buildConversationSourceLabel(source)}
                         </div>
-                        <Zoom>
-                          <Image
-                            src={buildSourceImageUrl(source)}
-                            alt={source.name}
-                            width={220}
-                            height={160}
-                            unoptimized
-                            className="block h-24 w-full cursor-zoom-in bg-stone-50 object-contain"
-                          />
-                        </Zoom>
+                        <ZoomableImage
+                          src={buildSourceImageUrl(source)}
+                          alt={source.name}
+                          width={220}
+                          height={160}
+                          className="block h-24 w-full bg-stone-50 object-contain"
+                        />
                       </div>
                     ))}
                   </div>
@@ -350,16 +365,13 @@ export const ConversationTurns = memo(function ConversationTurns({
                       >
                         {image.status === "success" && imageDataUrl ? (
                           <div>
-                            <Zoom>
-                              <Image
-                                src={imageDataUrl}
-                                alt={`Generated result ${index + 1}`}
-                                width={1024}
-                                height={1024}
-                                unoptimized
-                                className="block h-auto max-h-[270px] w-auto max-w-full cursor-zoom-in"
-                              />
-                            </Zoom>
+                            <ZoomableImage
+                              src={imageDataUrl}
+                              alt={`Generated result ${index + 1}`}
+                              width={1024}
+                              height={1024}
+                              className="block h-auto max-h-[270px] w-auto max-w-full"
+                            />
                             <div className="flex flex-wrap items-center gap-2 border-t border-stone-100 px-4 py-3">
                               <button
                                 type="button"

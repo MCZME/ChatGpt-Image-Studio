@@ -28,6 +28,7 @@ import {
   type ImageConversationTurn,
   type ImageMode,
   type StoredImage,
+  type StoredSourceImage,
 } from "@/store/image-conversations";
 import { ConversationTurns } from "./components/conversation-turns";
 import { EmptyState } from "./components/empty-state";
@@ -45,7 +46,12 @@ import { WorkspaceHeader } from "./components/workspace-header";
 import { useImageHistory } from "./hooks/use-image-history";
 import { useImageSourceInputs } from "./hooks/use-image-source-inputs";
 import { useImageSubmit } from "./hooks/use-image-submit";
-import { buildConversationPreviewSource } from "./view-utils";
+import { buildConversationPreviewSource, buildSourceImageUrl } from "./view-utils";
+import {
+  buildWorkspaceForwardSearch,
+  parseWorkspaceForwardPayload,
+  type WorkspaceForwardImageOrigin,
+} from "./workspace-forward";
 
 type ImageAspectRatio = "auto" | "1:1" | "4:3" | "3:2" | "16:9" | "21:9" | "9:16";
 type ImageResolutionTier = "auto-free" | "auto-paid" | "sd" | "2k" | "4k";
@@ -456,6 +462,12 @@ function applyTaskViewToConversation(
       finishedAt: task.finishedAt,
       cancelRequested: task.cancelRequested,
       error: mergedError,
+      category: task.category || turn.category,
+      tags: task.tags && task.tags.length > 0 ? task.tags : turn.tags,
+      sourceImages:
+        task.sourceImages && task.sourceImages.length > 0
+          ? normalizeTaskSourceImagesForConversation(task.sourceImages)
+          : turn.sourceImages,
       images: mergedImages,
     };
   });
@@ -463,6 +475,41 @@ function applyTaskViewToConversation(
     ...conversation,
     turns,
   });
+}
+
+function normalizeTaskSourceImagesForConversation(
+  items: ImageTaskView["sourceImages"],
+): StoredSourceImage[] | undefined {
+  if (!items || items.length === 0) {
+    return undefined;
+  }
+  return items.map((item) => ({
+    id: item.id,
+    role: item.role === "mask" ? "mask" : "image",
+    name: item.name,
+    dataUrl: item.dataUrl,
+    url: item.url,
+    origin: item.source ?? item.origin,
+  }));
+}
+
+function toWorkspaceGalleryOrigin(
+  origin: StoredSourceImage["origin"],
+): WorkspaceForwardImageOrigin | undefined {
+  if (origin?.type !== "gallery" || !origin.gallery?.assetId) {
+    return undefined;
+  }
+  return {
+    type: "gallery",
+    confirmed: origin.confirmed,
+    gallery: {
+      assetId: origin.gallery.assetId,
+      index: origin.gallery.index,
+      conversationId: origin.gallery.conversationId,
+      turnId: origin.gallery.turnId,
+      imageId: origin.gallery.imageId,
+    },
+  };
 }
 
 function buildProcessingStatus(
@@ -525,7 +572,8 @@ function buildProcessingStatus(
 }
 
 export default function ImagePage() {
-  const { pathname } = useLocation();
+  const location = useLocation();
+  const { pathname, search } = location;
   const navigate = useNavigate();
   const didLoadQuotaRef = useRef(false);
   const mountedRef = useRef(true);
@@ -540,7 +588,12 @@ export default function ImagePage() {
   const previousLastTurnKeyRef = useRef("");
 
   const [mode, setMode] = useState<ImageMode>("generate");
+  const [imageTitle, setImageTitle] = useState("");
   const [imagePrompt, setImagePrompt] = useState("");
+  const [imageCategory, setImageCategory] = useState("");
+  const [imageTagsInput, setImageTagsInput] = useState("");
+  const [autoImportUploadedSources, setAutoImportUploadedSources] =
+    useState(true);
   const [imageCount, setImageCount] = useState("1");
   const [imageAspectRatio, setImageAspectRatio] =
     useState<ImageAspectRatio>("1:1");
@@ -640,6 +693,7 @@ export default function ImagePage() {
     openSelectionEditor,
     openSourceSelectionEditor,
     closeSelectionEditor,
+    appendForwardedImages,
   } = useImageSourceInputs({
     mode,
     selectedConversationId,
@@ -647,6 +701,7 @@ export default function ImagePage() {
     focusConversation,
     textareaRef,
     makeId,
+    autoImportUploadedSources,
   });
   const selectedConversationActiveTaskByTurnId = useMemo(() => {
     const next = new Map<string, ImageTaskView>();
@@ -730,6 +785,18 @@ export default function ImagePage() {
   const parsedCount = useMemo(
     () => Math.max(1, Math.min(8, Number(imageCount) || 1)),
     [imageCount],
+  );
+  const imageTags = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          imageTagsInput
+            .split(/[,\n，]/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+        ),
+      ),
+    [imageTagsInput],
   );
   const hasAvailablePaidAccount = useMemo(
     () =>
@@ -1228,20 +1295,6 @@ export default function ImagePage() {
   }, [activeRequestStartedAt]);
 
   useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) {
-      return;
-    }
-
-    textarea.style.height = "auto";
-    const maxHeight = Math.min(
-      480,
-      Math.max(260, Math.floor(window.innerHeight * 0.42)),
-    );
-    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
-  }, [imagePrompt, mode]);
-
-  useEffect(() => {
     window.dispatchEvent(
       new CustomEvent("chatgpt-image-studio:mobile-workspace-title", {
         detail: { title: selectedConversation?.title ?? null },
@@ -1328,6 +1381,8 @@ export default function ImagePage() {
             title: "",
             mode: "generate",
             prompt: "",
+            category: task.category,
+            tags: task.tags,
             model: "gpt-image-2",
             count: task.count,
             images: [],
@@ -1347,7 +1402,10 @@ export default function ImagePage() {
   const resetComposer = useCallback(
     (nextMode: ImageMode = mode) => {
       setMode(nextMode);
+      setImageTitle("");
       setImagePrompt("");
+      setImageCategory("");
+      setImageTagsInput("");
       setImageCount("1");
       setSourceImages([]);
     },
@@ -1378,8 +1436,11 @@ export default function ImagePage() {
   const applyPromptExample = useCallback(
     (example: (typeof inspirationExamples)[number]) => {
       setMode("generate");
+      setImageTitle("");
       setImageCount(String(example.count));
       setImagePrompt(example.prompt);
+      setImageCategory("");
+      setImageTagsInput("");
       openDraftConversation();
       setSourceImages([]);
       textareaRef.current?.focus();
@@ -1390,7 +1451,10 @@ export default function ImagePage() {
   const { handleSelectionEditSubmit, handleRetryTurn, handleSubmit } =
     useImageSubmit({
       mode,
+      imageTitle,
       imagePrompt,
+      imageCategory,
+      imageTags,
       imageModel: "gpt-image-2",
       imageSources,
       maskSource,
@@ -1411,6 +1475,67 @@ export default function ImagePage() {
       updateConversation,
       resetComposer,
     });
+
+  useEffect(() => {
+    const payload = parseWorkspaceForwardPayload(search);
+    if (!payload) {
+      return;
+    }
+
+    if (payload.mode) {
+      setMode(payload.mode);
+    }
+    if (typeof payload.count === "number") {
+      setImageCount(String(payload.count));
+    }
+    if (typeof payload.prompt === "string") {
+      setImagePrompt(payload.prompt);
+    }
+    if (typeof payload.title === "string") {
+      setImageTitle(payload.title);
+    }
+    if (typeof payload.category === "string") {
+      setImageCategory(payload.category);
+    }
+    if (Array.isArray(payload.tags)) {
+      setImageTagsInput(payload.tags.join(", "));
+    }
+    if (payload.images && payload.images.length > 0) {
+      appendForwardedImages(payload.images);
+    }
+
+    openDraftConversation();
+    navigate(
+      {
+        pathname,
+        search: "",
+      },
+      { replace: true },
+    );
+  }, [appendForwardedImages, navigate, openDraftConversation, pathname, search]);
+
+  const handleOpenGalleryPicker = useCallback(
+    (role: "image" | "mask", promptOverride?: string) => {
+      const forward = buildWorkspaceForwardSearch({
+        title: imageTitle,
+        mode,
+        prompt: promptOverride ?? imagePrompt,
+        count: parsedCount,
+        category: imageCategory,
+        tags: imageTags,
+        images: sourceImages
+          .map((item) => ({
+            role: item.role,
+            name: item.name,
+            url: buildSourceImageUrl(item),
+            origin: toWorkspaceGalleryOrigin(item.origin),
+          }))
+          .filter((item) => item.url && item.origin?.type === "gallery"),
+      });
+      navigate(`/images?pick=${role}&${forward}`);
+    },
+    [imageCategory, imagePrompt, imageTags, imageTitle, mode, navigate, parsedCount, sourceImages],
+  );
 
   const handleCancelTurn = useCallback(
     async (conversationId: string, turn: ImageConversationTurn) => {
@@ -1571,7 +1696,11 @@ export default function ImagePage() {
         imageQualityDisabledReason={imageQualityDisabledReason}
         availableQuota={availableQuota}
         sourceImages={sourceImages}
+        imageTitle={imageTitle}
         imagePrompt={imagePrompt}
+        imageCategory={imageCategory}
+        imageTags={imageTagsInput}
+        autoImportUploadedSources={autoImportUploadedSources}
         textareaRef={textareaRef}
         uploadInputRef={uploadInputRef}
         maskInputRef={maskInputRef}
@@ -1584,10 +1713,15 @@ export default function ImagePage() {
           setImageResolutionTier(value as ImageResolutionTier)
         }
         onImageQualityChange={(value) => setImageQuality(value as ImageQuality)}
+        onTitleChange={setImageTitle}
         onPromptChange={setImagePrompt}
+        onCategoryChange={setImageCategory}
+        onTagsChange={setImageTagsInput}
+        onAutoImportUploadedSourcesChange={setAutoImportUploadedSources}
         onPromptPaste={handlePromptPaste}
         onRemoveSourceImage={removeSourceImage}
         onOpenSourceSelectionEditor={openSourceSelectionEditor}
+        onOpenGalleryPicker={handleOpenGalleryPicker}
         onAppendFiles={appendFiles}
         onMobileCollapsedChange={setIsMobileComposerCollapsed}
         onSubmit={handleSubmit}

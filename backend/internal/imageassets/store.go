@@ -3,6 +3,7 @@ package imageassets
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,37 +18,66 @@ import (
 const defaultAssetSQLitePath = "data/image-assets.db"
 
 type Asset struct {
-	ID              string   `json:"id"`
-	Title           string   `json:"title"`
-	Prompt          string   `json:"prompt"`
-	RevisedPrompt   string   `json:"revisedPrompt,omitempty"`
-	Mode            string   `json:"mode"`
-	Model           string   `json:"model"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt,omitempty"`
-	ConversationID  string   `json:"conversationId,omitempty"`
-	TurnID          string   `json:"turnId,omitempty"`
-	ImageID         string   `json:"imageId,omitempty"`
-	Status          string   `json:"status,omitempty"`
-	ImageURL        string   `json:"imageUrl,omitempty"`
-	ImageB64JSON    string   `json:"imageB64Json,omitempty"`
-	Filename        string   `json:"filename,omitempty"`
-	MIMEType        string   `json:"mimeType,omitempty"`
-	SizeBytes       int64    `json:"sizeBytes,omitempty"`
-	SHA256          string   `json:"sha256,omitempty"`
-	StorageKind     string   `json:"storageKind,omitempty"`
-	SourceKind      string   `json:"sourceKind,omitempty"`
-	OriginalURL     string   `json:"originalUrl,omitempty"`
-	FileID          string   `json:"fileId,omitempty"`
-	GenID           string   `json:"genId,omitempty"`
-	SourceAccountID string   `json:"sourceAccountId,omitempty"`
-	Category        string   `json:"category,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	Favorite        bool     `json:"favorite,omitempty"`
+	ID              string             `json:"id"`
+	Title           string             `json:"title"`
+	Prompt          string             `json:"prompt"`
+	RevisedPrompt   string             `json:"revisedPrompt,omitempty"`
+	Mode            string             `json:"mode"`
+	Model           string             `json:"model"`
+	CreatedAt       string             `json:"createdAt"`
+	UpdatedAt       string             `json:"updatedAt,omitempty"`
+	ConversationID  string             `json:"conversationId,omitempty"`
+	TurnID          string             `json:"turnId,omitempty"`
+	ImageID         string             `json:"imageId,omitempty"`
+	Status          string             `json:"status,omitempty"`
+	ImageURL        string             `json:"imageUrl,omitempty"`
+	ImageB64JSON    string             `json:"imageB64Json,omitempty"`
+	Filename        string             `json:"filename,omitempty"`
+	MIMEType        string             `json:"mimeType,omitempty"`
+	SizeBytes       int64              `json:"sizeBytes,omitempty"`
+	SHA256          string             `json:"sha256,omitempty"`
+	StorageKind     string             `json:"storageKind,omitempty"`
+	SourceKind      string             `json:"sourceKind,omitempty"`
+	OriginalURL     string             `json:"originalUrl,omitempty"`
+	FileID          string             `json:"fileId,omitempty"`
+	GenID           string             `json:"genId,omitempty"`
+	SourceAccountID string             `json:"sourceAccountId,omitempty"`
+	Category        string             `json:"category,omitempty"`
+	Tags            []string           `json:"tags,omitempty"`
+	SourceImages    []AssetSourceImage `json:"sourceImages,omitempty"`
+	Note            string             `json:"note,omitempty"`
+	Favorite        bool               `json:"favorite,omitempty"`
+}
+
+type AssetSourceImage struct {
+	ID       string             `json:"id,omitempty"`
+	Role     string             `json:"role,omitempty"`
+	Name     string             `json:"name,omitempty"`
+	URL      string             `json:"url,omitempty"`
+	Category string             `json:"category,omitempty"`
+	Tags     []string           `json:"tags,omitempty"`
+	Origin   *AssetSourceOrigin `json:"origin,omitempty"`
+	Source   *AssetSourceOrigin `json:"source,omitempty"`
+}
+
+type AssetSourceOrigin struct {
+	Type      string                       `json:"type,omitempty"`
+	Confirmed bool                         `json:"confirmed,omitempty"`
+	URL       string                       `json:"url,omitempty"`
+	FilePath  string                       `json:"filePath,omitempty"`
+	Gallery   *AssetSourceGalleryReference `json:"gallery,omitempty"`
+}
+
+type AssetSourceGalleryReference struct {
+	AssetID        string `json:"assetId,omitempty"`
+	Index          *int   `json:"index,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	TurnID         string `json:"turnId,omitempty"`
+	ImageID        string `json:"imageId,omitempty"`
 }
 
 type MetadataPatch struct {
+	Title    *string   `json:"title,omitempty"`
 	Category *string   `json:"category,omitempty"`
 	Tags     *[]string `json:"tags,omitempty"`
 	Note     *string   `json:"note,omitempty"`
@@ -56,6 +86,7 @@ type MetadataPatch struct {
 
 type BulkMetadataPatch struct {
 	IDs      []string  `json:"ids"`
+	Title    *string   `json:"title,omitempty"`
 	Category *string   `json:"category,omitempty"`
 	Tags     *[]string `json:"tags,omitempty"`
 	Note     *string   `json:"note,omitempty"`
@@ -146,6 +177,7 @@ var assetColumnSpecs = []assetColumnSpec{
 	{Name: "gen_id", SQL: "gen_id TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "source_account_id", SQL: "source_account_id TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "category", SQL: "category TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "source_images", SQL: "source_images TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "note", SQL: "note TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "favorite", SQL: "favorite INTEGER NOT NULL DEFAULT 0", Required: true},
 }
@@ -196,6 +228,10 @@ func (s *Store) init() error {
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_category ON image_assets(category);`,
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_favorite ON image_assets(favorite, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_image_asset_tags_tag ON image_asset_tags(tag);`,
+		`CREATE TABLE IF NOT EXISTS image_asset_deletions (
+			asset_id TEXT PRIMARY KEY,
+			deleted_at TEXT NOT NULL DEFAULT ''
+		);`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS image_assets_fts USING fts5(
 			asset_id UNINDEXED,
 			title,
@@ -424,6 +460,7 @@ func (s *Store) hasCompatibleAssetSchema() (bool, error) {
 		"gen_id",
 		"source_account_id",
 		"category",
+		"source_images",
 		"note",
 		"favorite",
 	}
@@ -573,7 +610,7 @@ func (s *Store) ListPage(ctx context.Context, filter FilterOptions) (ListResult,
 			a.id, a.title, a.prompt, a.revised_prompt, a.mode, a.model, a.created_at, a.updated_at,
 			a.conversation_id, a.turn_id, a.image_id, a.status, a.image_url, a.image_b64_json,
 			a.filename, a.mime_type, a.size_bytes, a.sha256, a.storage_kind, a.source_kind, a.original_url,
-			a.file_id, a.gen_id, a.source_account_id, a.category, a.note, a.favorite
+			a.file_id, a.gen_id, a.source_account_id, a.category, a.source_images, a.note, a.favorite
 		FROM image_assets a`
 	joins := []string{}
 	conditions := []string{}
@@ -683,7 +720,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Asset, error) {
 		SELECT id, title, prompt, revised_prompt, mode, model, created_at, updated_at,
 		       conversation_id, turn_id, image_id, status, image_url, image_b64_json,
 		       filename, mime_type, size_bytes, sha256, storage_kind, source_kind, original_url,
-		       file_id, gen_id, source_account_id, category, note, favorite
+		       file_id, gen_id, source_account_id, category, source_images, note, favorite
 		FROM image_assets
 		WHERE id = ?`, cleanID(id))
 	item, err := scanAssetRow(row)
@@ -705,7 +742,19 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 	if err != nil {
 		return nil, err
 	}
+	if shouldRespectAssetDeletion(normalized) {
+		deleted, err := s.deletedIDs(ctx, []string{normalized.ID})
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := deleted[normalized.ID]; ok {
+			return nil, nil
+		}
+	}
 	if current, err := s.Get(ctx, normalized.ID); err == nil && current != nil {
+		if shouldPreserveStoredTitle(normalized, *current) {
+			normalized.Title = current.Title
+		}
 		if normalized.Category == "" {
 			normalized.Category = current.Category
 		}
@@ -739,6 +788,9 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 		if normalized.OriginalURL == "" {
 			normalized.OriginalURL = current.OriginalURL
 		}
+		if len(normalized.SourceImages) == 0 {
+			normalized.SourceImages = append([]AssetSourceImage(nil), current.SourceImages...)
+		}
 	} else if err != nil {
 		return nil, err
 	}
@@ -748,10 +800,48 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 	return &normalized, nil
 }
 
+func shouldPreserveStoredTitle(incoming, current Asset) bool {
+	if strings.TrimSpace(current.Title) == "" {
+		return false
+	}
+	if strings.TrimSpace(incoming.Title) == "" {
+		return true
+	}
+	if strings.TrimSpace(incoming.Title) == strings.TrimSpace(current.Title) {
+		return false
+	}
+	return incoming.ConversationID != "" && incoming.TurnID != ""
+}
+
 func (s *Store) SaveMany(ctx context.Context, items []Asset) ([]Asset, error) {
 	result := make([]Asset, 0, len(items))
+	skipDeleted := map[string]struct{}{}
+	idsToCheck := []string{}
 	for _, item := range items {
-		saved, err := s.Save(ctx, item)
+		normalized, err := normalizeAsset(item)
+		if err != nil {
+			return nil, err
+		}
+		if shouldRespectAssetDeletion(normalized) {
+			idsToCheck = append(idsToCheck, normalized.ID)
+		}
+	}
+	if len(idsToCheck) > 0 {
+		var err error
+		skipDeleted, err = s.deletedIDs(ctx, idsToCheck)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, item := range items {
+		normalized, err := normalizeAsset(item)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := skipDeleted[normalized.ID]; ok {
+			continue
+		}
+		saved, err := s.Save(ctx, normalized)
 		if err != nil {
 			return nil, err
 		}
@@ -772,6 +862,9 @@ func (s *Store) UpdateMetadata(ctx context.Context, id string, patch MetadataPat
 		return nil, fmt.Errorf("asset not found")
 	}
 	next := *current
+	if patch.Title != nil {
+		next.Title = strings.TrimSpace(*patch.Title)
+	}
 	if patch.Category != nil {
 		next.Category = strings.TrimSpace(*patch.Category)
 	}
@@ -798,6 +891,7 @@ func (s *Store) UpdateMetadataBatch(ctx context.Context, patch BulkMetadataPatch
 	result := make([]Asset, 0, len(ids))
 	for _, id := range ids {
 		item, err := s.UpdateMetadata(ctx, id, MetadataPatch{
+			Title:    patch.Title,
 			Category: patch.Category,
 			Tags:     patch.Tags,
 			Note:     patch.Note,
@@ -808,6 +902,77 @@ func (s *Store) UpdateMetadataBatch(ctx context.Context, patch BulkMetadataPatch
 		}
 		if item != nil {
 			result = append(result, *item)
+		}
+	}
+	sortAssets(result)
+	return result, nil
+}
+
+func (s *Store) Delete(ctx context.Context, id string) (*Asset, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("asset store is unavailable")
+	}
+	cleanedID := cleanID(id)
+	if cleanedID == "" {
+		return nil, fmt.Errorf("asset id is required")
+	}
+	current, err := s.Get(ctx, cleanedID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("asset not found")
+	}
+	if err := s.deleteAsset(ctx, *current, shouldRememberAssetDeletion(*current)); err != nil {
+		return nil, err
+	}
+	return current, nil
+}
+
+func (s *Store) DeleteBatch(ctx context.Context, ids []string) ([]Asset, error) {
+	normalizedIDs := normalizeIDs(ids)
+	if len(normalizedIDs) == 0 {
+		return nil, fmt.Errorf("asset ids are required")
+	}
+	result := make([]Asset, 0, len(normalizedIDs))
+	for _, id := range normalizedIDs {
+		item, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if item == nil {
+			return nil, fmt.Errorf("asset not found")
+		}
+		result = append(result, *item)
+	}
+	for _, item := range result {
+		if err := s.deleteAsset(ctx, item, shouldRememberAssetDeletion(item)); err != nil {
+			return nil, err
+		}
+	}
+	sortAssets(result)
+	return result, nil
+}
+
+func (s *Store) DeleteExisting(ctx context.Context, ids []string) ([]Asset, error) {
+	normalizedIDs := normalizeIDs(ids)
+	if len(normalizedIDs) == 0 {
+		return []Asset{}, nil
+	}
+	result := make([]Asset, 0, len(normalizedIDs))
+	for _, id := range normalizedIDs {
+		item, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if item == nil {
+			continue
+		}
+		result = append(result, *item)
+	}
+	for _, item := range result {
+		if err := s.deleteAsset(ctx, item, shouldRememberAssetDeletion(item)); err != nil {
+			return nil, err
 		}
 	}
 	sortAssets(result)
@@ -862,6 +1027,66 @@ func (s *Store) DeleteAutoAssets(ctx context.Context, options []DeleteAutoOption
 	return nil
 }
 
+func (s *Store) deletedIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	if s == nil || s.db == nil || len(ids) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	result := map[string]struct{}{}
+	for _, id := range normalizeIDs(ids) {
+		var assetID string
+		err := s.db.QueryRowContext(ctx, `SELECT asset_id FROM image_asset_deletions WHERE asset_id = ?`, id).Scan(&assetID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result[assetID] = struct{}{}
+	}
+	return result, nil
+}
+
+func (s *Store) deleteAsset(ctx context.Context, asset Asset, rememberDeletion bool) (err error) {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("asset store is unavailable")
+	}
+	cleanedID := cleanID(asset.ID)
+	if cleanedID == "" {
+		return fmt.Errorf("asset id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM image_asset_tags WHERE asset_id = ?`, cleanedID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM image_assets_fts WHERE asset_id = ?`, cleanedID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM image_assets WHERE id = ?`, cleanedID); err != nil {
+		return err
+	}
+	if rememberDeletion {
+		if _, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO image_asset_deletions(asset_id, deleted_at) VALUES(?, ?)
+			 ON CONFLICT(asset_id) DO UPDATE SET deleted_at = excluded.deleted_at`,
+			cleanedID,
+			time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ReferencedFiles(ctx context.Context) (map[string]struct{}, error) {
 	items, err := s.List(ctx)
 	if err != nil {
@@ -903,8 +1128,8 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 			id, title, prompt, revised_prompt, mode, model, created_at, updated_at,
 			conversation_id, turn_id, image_id, status, image_url, image_b64_json,
 			filename, mime_type, size_bytes, sha256, storage_kind, source_kind, original_url,
-			file_id, gen_id, source_account_id, category, note, favorite
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			file_id, gen_id, source_account_id, category, source_images, note, favorite
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = excluded.title,
 			prompt = excluded.prompt,
@@ -930,6 +1155,7 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 			gen_id = excluded.gen_id,
 			source_account_id = excluded.source_account_id,
 			category = excluded.category,
+			source_images = excluded.source_images,
 			note = excluded.note,
 			favorite = excluded.favorite`,
 		normalized.ID,
@@ -957,6 +1183,7 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 		normalized.GenID,
 		normalized.SourceAccountID,
 		normalized.Category,
+		mustMarshalSourceImages(normalized.SourceImages),
 		normalized.Note,
 		boolToInt(normalized.Favorite),
 	)
@@ -1156,6 +1383,7 @@ type rowScanner interface {
 func scanAssetRow(scanner rowScanner) (Asset, error) {
 	var item Asset
 	var favorite int
+	var sourceImagesRaw string
 	err := scanner.Scan(
 		&item.ID,
 		&item.Title,
@@ -1182,6 +1410,7 @@ func scanAssetRow(scanner rowScanner) (Asset, error) {
 		&item.GenID,
 		&item.SourceAccountID,
 		&item.Category,
+		&sourceImagesRaw,
 		&item.Note,
 		&favorite,
 	)
@@ -1189,6 +1418,7 @@ func scanAssetRow(scanner rowScanner) (Asset, error) {
 		return Asset{}, err
 	}
 	item.Favorite = favorite != 0
+	item.SourceImages = unmarshalSourceImages(sourceImagesRaw)
 	if item.Filename == "" {
 		item.Filename = FilenameFromImageURL(item.ImageURL)
 	}
@@ -1243,6 +1473,7 @@ func normalizeAsset(asset Asset) (Asset, error) {
 	asset.SourceAccountID = strings.TrimSpace(asset.SourceAccountID)
 	asset.Category = strings.TrimSpace(asset.Category)
 	asset.Tags = normalizeTags(asset.Tags)
+	asset.SourceImages = normalizeAssetSourceImages(asset.SourceImages)
 	asset.Note = strings.TrimSpace(asset.Note)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if strings.TrimSpace(asset.CreatedAt) == "" {
@@ -1250,6 +1481,134 @@ func normalizeAsset(asset Asset) (Asset, error) {
 	}
 	asset.UpdatedAt = now
 	return asset, nil
+}
+
+func normalizeAssetSourceImages(values []AssetSourceImage) []AssetSourceImage {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]AssetSourceImage, 0, len(values))
+	for _, value := range values {
+		normalized := AssetSourceImage{
+			ID:       cleanID(value.ID),
+			Role:     strings.TrimSpace(value.Role),
+			Name:     strings.TrimSpace(value.Name),
+			URL:      strings.TrimSpace(value.URL),
+			Category: strings.TrimSpace(value.Category),
+			Tags:     normalizeTags(value.Tags),
+			Origin:   normalizeAssetSourceOrigin(firstNonNilAssetOrigin(value.Origin, value.Source), value.URL),
+		}
+		if normalized.Origin != nil {
+			normalized.Source = normalized.Origin
+		}
+		if normalized.ID == "" && normalized.Role == "" && normalized.Name == "" && normalized.URL == "" && normalized.Category == "" && len(normalized.Tags) == 0 && normalized.Origin == nil {
+			continue
+		}
+		result = append(result, normalized)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func firstNonNilAssetOrigin(values ...*AssetSourceOrigin) *AssetSourceOrigin {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func normalizeAssetSourceOrigin(origin *AssetSourceOrigin, fallbackURL string) *AssetSourceOrigin {
+	if origin == nil {
+		if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+			return &AssetSourceOrigin{
+				Type:      "url",
+				Confirmed: true,
+				URL:       trimmed,
+			}
+		}
+		return nil
+	}
+	copy := *origin
+	copy.Type = strings.TrimSpace(copy.Type)
+	copy.URL = strings.TrimSpace(copy.URL)
+	copy.FilePath = strings.TrimSpace(copy.FilePath)
+	if copy.Gallery != nil {
+		gallery := *copy.Gallery
+		gallery.AssetID = cleanID(gallery.AssetID)
+		gallery.ConversationID = cleanID(gallery.ConversationID)
+		gallery.TurnID = cleanID(gallery.TurnID)
+		gallery.ImageID = cleanID(gallery.ImageID)
+		if gallery.AssetID == "" && gallery.ConversationID == "" && gallery.TurnID == "" && gallery.ImageID == "" && gallery.Index == nil {
+			copy.Gallery = nil
+		} else {
+			copy.Gallery = &gallery
+		}
+	}
+	if copy.Type == "" {
+		switch {
+		case copy.Gallery != nil:
+			copy.Type = "gallery"
+		case copy.FilePath != "":
+			copy.Type = "file"
+		case copy.URL != "":
+			copy.Type = "url"
+		case strings.TrimSpace(fallbackURL) != "":
+			copy.Type = "url"
+			copy.URL = strings.TrimSpace(fallbackURL)
+			copy.Confirmed = true
+		}
+	}
+	switch copy.Type {
+	case "gallery":
+		if copy.Gallery == nil {
+			return nil
+		}
+	case "file":
+		if copy.FilePath == "" {
+			return nil
+		}
+	case "url":
+		if copy.URL == "" {
+			if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+				copy.URL = trimmed
+				copy.Confirmed = true
+			} else {
+				return nil
+			}
+		}
+	default:
+		if copy.Gallery == nil && copy.FilePath == "" && copy.URL == "" {
+			return nil
+		}
+	}
+	return &copy
+}
+
+func mustMarshalSourceImages(values []AssetSourceImage) string {
+	if len(values) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(payload)
+}
+
+func unmarshalSourceImages(raw string) []AssetSourceImage {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	var items []AssetSourceImage
+	if err := json.Unmarshal([]byte(trimmed), &items); err != nil {
+		return nil
+	}
+	return normalizeAssetSourceImages(items)
 }
 
 func normalizeTags(values []string) []string {
@@ -1351,6 +1710,19 @@ func filenameFromAssetURL(raw string) string {
 		return filepath.Base(trimmed[index+len("/v1/files/image/"):])
 	}
 	return ""
+}
+
+func shouldRememberAssetDeletion(asset Asset) bool {
+	return strings.TrimSpace(asset.ConversationID) != "" ||
+		strings.TrimSpace(asset.TurnID) != "" ||
+		strings.TrimSpace(asset.ImageID) != ""
+}
+
+func shouldRespectAssetDeletion(asset Asset) bool {
+	if strings.TrimSpace(asset.SourceKind) == "import" || strings.TrimSpace(asset.Mode) == "import" {
+		return false
+	}
+	return shouldRememberAssetDeletion(asset)
 }
 
 func boolToInt(value bool) int {

@@ -261,3 +261,157 @@ func TestSQLiteStorePersistsImageHistoryAcrossReload(t *testing.T) {
 func TestRedisStorePersistsImageHistoryAcrossReload(t *testing.T) {
 	testStorePersistenceAcrossReload(t, "redis")
 }
+
+func TestStoreSavePersistsCategoryTagsAndSourceOrigins(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.New(root)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Storage.Backend = "current"
+	cfg.Storage.ImageDir = "data/images"
+
+	store, err := NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	galleryIndex := 7
+	created, err := store.Save(context.Background(), Conversation{
+		ID:        "conv-meta",
+		Title:     "图库转创作",
+		Mode:      "edit",
+		Prompt:    "reuse gallery image",
+		Model:     "gpt-image-2",
+		Count:     1,
+		Category:  "海报",
+		Tags:      []string{"海报", " 横幅 ", "海报"},
+		CreatedAt: "2026-05-26T00:00:00Z",
+		Status:    "success",
+		Turns: []Turn{{
+			ID:        "turn-meta",
+			Title:     "图库转创作",
+			Mode:      "edit",
+			Prompt:    "reuse gallery image",
+			Model:     "gpt-image-2",
+			Count:     1,
+			Category:  "海报",
+			Tags:      []string{"海报", "横幅", "海报"},
+			CreatedAt: "2026-05-26T00:00:00Z",
+			Status:    "success",
+			SourceImages: []SourceImage{
+				{
+					ID:       "gallery-source",
+					Role:     "image",
+					Name:     "gallery.png",
+					URL:      "/v1/files/image/gallery-source.png",
+					Category: "参考图",
+					Tags:     []string{"图库", "已选"},
+					Source: &ImageSourceOrigin{
+						Type:      "gallery",
+						Confirmed: true,
+						Gallery: &ImageSourceGalleryReference{
+							AssetID:        "asset-7",
+							Index:          &galleryIndex,
+							ConversationID: "conv-gallery",
+							TurnID:         "turn-gallery",
+							ImageID:        "img-gallery",
+						},
+					},
+				},
+				{
+					ID:   "pending-upload",
+					Role: "image",
+					Name: "local.png",
+					Source: &ImageSourceOrigin{
+						Type:      "file",
+						Confirmed: false,
+						FilePath:  `C:\temp\local.png`,
+					},
+				},
+				{
+					ID:   "pending-url",
+					Role: "image",
+					Name: "remote.png",
+					Source: &ImageSourceOrigin{
+						Type:      "url",
+						Confirmed: false,
+						URL:       "https://example.com/remote.png",
+					},
+				},
+			},
+			Images: []Image{{
+				ID:     "result-meta",
+				Status: "success",
+				URL:    "/v1/files/image/result-meta.png",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if created.Category != "海报" {
+		t.Fatalf("created category = %q, want 海报", created.Category)
+	}
+	if len(created.Tags) != 2 || created.Tags[0] != "海报" || created.Tags[1] != "横幅" {
+		t.Fatalf("created tags = %#v, want deduplicated tags", created.Tags)
+	}
+	if got := created.Turns[0].SourceImages[1].Source; got == nil || got.FilePath != `C:\temp\local.png` || got.Confirmed {
+		t.Fatalf("pending file source = %#v, want unconfirmed file path", got)
+	}
+	if got := created.Turns[0].SourceImages[2].Source; got == nil || got.URL != "https://example.com/remote.png" || got.Confirmed {
+		t.Fatalf("pending url source = %#v, want unconfirmed url", got)
+	}
+
+	loaded, err := store.Get(context.Background(), "conv-meta")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("Get returned nil conversation")
+	}
+	if loaded.Category != "海报" {
+		t.Fatalf("loaded category = %q, want 海报", loaded.Category)
+	}
+	if len(loaded.Turns) != 1 {
+		t.Fatalf("loaded turns = %d, want 1", len(loaded.Turns))
+	}
+	turn := loaded.Turns[0]
+	if turn.Category != "海报" {
+		t.Fatalf("turn category = %q, want 海报", turn.Category)
+	}
+	if len(turn.Tags) != 2 || turn.Tags[0] != "海报" || turn.Tags[1] != "横幅" {
+		t.Fatalf("turn tags = %#v, want persisted tags", turn.Tags)
+	}
+	if got := turn.SourceImages[0].Source; got == nil || got.Gallery == nil || got.Gallery.AssetID != "asset-7" || got.Gallery.Index == nil || *got.Gallery.Index != 7 {
+		t.Fatalf("gallery source = %#v, want persisted gallery reference", got)
+	}
+
+	asset, err := store.assetStore.Get(context.Background(), "conv-meta::turn-meta::result-meta")
+	if err != nil {
+		t.Fatalf("assetStore.Get: %v", err)
+	}
+	if asset == nil {
+		t.Fatal("assetStore.Get returned nil asset")
+	}
+	if len(asset.SourceImages) != 3 {
+		t.Fatalf("asset sourceImages len = %d, want 3", len(asset.SourceImages))
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "data", "image-assets.db"))
+	if err != nil {
+		t.Fatalf("ReadFile(image-assets.db): %v", err)
+	}
+	if strings.Contains(string(raw), "data:image/") {
+		t.Fatal("image asset db should not store source image dataUrl payloads")
+	}
+	if got := asset.SourceImages[0].Origin; got == nil || got.Gallery == nil || got.Gallery.AssetID != "asset-7" {
+		t.Fatalf("asset gallery source = %#v, want gallery reference", got)
+	}
+	if got := asset.SourceImages[1].Origin; got == nil || got.FilePath != `C:\temp\local.png` || got.Confirmed {
+		t.Fatalf("asset pending file source = %#v, want unconfirmed file path", got)
+	}
+	if got := asset.SourceImages[2].Origin; got == nil || got.URL != "https://example.com/remote.png" || got.Confirmed {
+		t.Fatalf("asset pending url source = %#v, want unconfirmed remote url", got)
+	}
+}

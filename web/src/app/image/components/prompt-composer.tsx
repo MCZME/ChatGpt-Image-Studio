@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type ReactNode, type RefObject } from "react";
-import Zoom from "react-medium-image-zoom";
-import { ArrowUp, Brush, ChevronDown, CircleHelp, ImagePlus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { ArrowUp, Brush, ChevronDown, CircleHelp, FolderOpen, ImagePlus, Trash2 } from "lucide-react";
 
-import { AppImage as Image } from "@/components/app-image";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { ZoomableImage } from "@/components/zoomable-image";
 import {
   Select,
   SelectContent,
@@ -36,7 +36,11 @@ type PromptComposerProps = {
   imageQualityDisabledReason: string;
   availableQuota: string;
   sourceImages: StoredSourceImage[];
+  imageTitle: string;
   imagePrompt: string;
+  imageCategory: string;
+  imageTags: string;
+  autoImportUploadedSources: boolean;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   uploadInputRef: RefObject<HTMLInputElement | null>;
   maskInputRef: RefObject<HTMLInputElement | null>;
@@ -46,12 +50,17 @@ type PromptComposerProps = {
   onImageResolutionTierChange: (value: string) => void;
   onImageQualityChange: (value: string) => void;
   onPromptChange: (value: string) => void;
+  onTitleChange: (value: string) => void;
+  onCategoryChange: (value: string) => void;
+  onTagsChange: (value: string) => void;
+  onAutoImportUploadedSourcesChange: (value: boolean) => void;
   onPromptPaste: (event: ReactClipboardEvent<HTMLTextAreaElement>) => void;
   onRemoveSourceImage: (id: string) => void;
   onOpenSourceSelectionEditor: (sourceImageId: string) => void;
+  onOpenGalleryPicker: (role: "image" | "mask", promptOverride?: string) => void;
   onAppendFiles: (files: FileList | null, role: "image" | "mask") => Promise<void>;
   onMobileCollapsedChange?: (collapsed: boolean) => void;
-  onSubmit: () => Promise<void>;
+  onSubmit: (promptOverride?: string) => Promise<void>;
 };
 
 export function PromptComposer({
@@ -70,7 +79,11 @@ export function PromptComposer({
   imageQualityDisabledReason,
   availableQuota,
   sourceImages,
+  imageTitle,
   imagePrompt,
+  imageCategory,
+  imageTags,
+  autoImportUploadedSources,
   textareaRef,
   uploadInputRef,
   maskInputRef,
@@ -80,9 +93,14 @@ export function PromptComposer({
   onImageResolutionTierChange,
   onImageQualityChange,
   onPromptChange,
+  onTitleChange,
+  onCategoryChange,
+  onTagsChange,
+  onAutoImportUploadedSourcesChange,
   onPromptPaste,
   onRemoveSourceImage,
   onOpenSourceSelectionEditor,
+  onOpenGalleryPicker,
   onAppendFiles,
   onMobileCollapsedChange,
   onSubmit,
@@ -91,9 +109,14 @@ export function PromptComposer({
   const showImageOutputControls = mode === "edit" || mode === "generate";
   const sizeHintAriaLabel = mode === "edit" ? "查看编辑输出说明" : "查看分辨率说明";
   const imageQualityPrefix = mode === "edit" ? "输出质量" : "质量";
-  const hasComposerContent = imagePrompt.trim().length > 0 || sourceImages.length > 0;
+  const [draftPrompt, setDraftPrompt] = useState(imagePrompt);
+  const draftPromptRef = useRef(imagePrompt);
+  const lastCommittedPromptRef = useRef(imagePrompt);
+  const promptCommitTimerRef = useRef<number | null>(null);
+  const hasComposerContent = draftPrompt.trim().length > 0 || sourceImages.length > 0;
   const previousHasComposerContentRef = useRef(hasComposerContent);
   const [isMobileComposerExpanded, setIsMobileComposerExpanded] = useState(hasComposerContent);
+  const [isPromptComposing, setIsPromptComposing] = useState(false);
   const isMobileComposerCollapsed = !isMobileComposerExpanded;
   const showMobileExpandedSections = !isMobileComposerCollapsed;
 
@@ -111,6 +134,68 @@ export function PromptComposer({
     onMobileCollapsedChange?.(isMobileComposerCollapsed);
   }, [isMobileComposerCollapsed, onMobileCollapsedChange]);
 
+  useEffect(() => {
+    draftPromptRef.current = draftPrompt;
+  }, [draftPrompt]);
+
+  useEffect(() => {
+    if (imagePrompt === lastCommittedPromptRef.current) {
+      return;
+    }
+
+    lastCommittedPromptRef.current = imagePrompt;
+    draftPromptRef.current = imagePrompt;
+    setDraftPrompt(imagePrompt);
+  }, [imagePrompt]);
+
+  useEffect(() => {
+    return () => {
+      if (promptCommitTimerRef.current !== null) {
+        window.clearTimeout(promptCommitTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "auto";
+    const maxHeight = Math.min(
+      480,
+      Math.max(260, Math.floor(window.innerHeight * 0.42)),
+    );
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  }, [draftPrompt, mode, textareaRef]);
+
+  const commitPromptChange = (value: string) => {
+    if (promptCommitTimerRef.current !== null) {
+      window.clearTimeout(promptCommitTimerRef.current);
+      promptCommitTimerRef.current = null;
+    }
+    lastCommittedPromptRef.current = value;
+    onPromptChange(value);
+  };
+
+  const schedulePromptCommit = (value: string) => {
+    if (promptCommitTimerRef.current !== null) {
+      window.clearTimeout(promptCommitTimerRef.current);
+    }
+    promptCommitTimerRef.current = window.setTimeout(() => {
+      promptCommitTimerRef.current = null;
+      lastCommittedPromptRef.current = value;
+      onPromptChange(value);
+    }, 250);
+  };
+
+  const flushPromptChange = () => {
+    const value = draftPromptRef.current;
+    commitPromptChange(value);
+    return value;
+  };
+
   const sizeHintTooltip =
     showImageOutputControls ? (
       <span className="group relative hidden shrink-0 items-center align-middle sm:inline-flex">
@@ -126,6 +211,26 @@ export function PromptComposer({
         </span>
       </span>
     ) : null;
+
+  const focusPromptAfterExpand = () => {
+    setIsMobileComposerExpanded(true);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  };
+
+  const handlePromptKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+
+    if (isPromptComposing || event.nativeEvent.isComposing || event.keyCode === 229) {
+      return;
+    }
+
+    event.preventDefault();
+    void onSubmit(flushPromptChange());
+  };
 
   return (
     <div
@@ -265,13 +370,7 @@ export function PromptComposer({
           </div>
         </div>
 
-          <div
-          className="overflow-hidden rounded-[24px] border border-stone-200 bg-[#fafaf9] shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] transition-colors duration-200 dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:rounded-[28px]"
-          onClick={() => {
-            setIsMobileComposerExpanded(true);
-            textareaRef.current?.focus();
-          }}
-        >
+          <div className="overflow-hidden rounded-[24px] border border-stone-200 bg-[#fafaf9] shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] transition-colors duration-200 dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:rounded-[28px]">
           {sourceImages.length > 0 ? (
             <div
               className={cn(
@@ -313,16 +412,18 @@ export function PromptComposer({
                       </button>
                     </div>
                   </div>
-                  <Zoom>
-                    <Image
-                      src={buildSourceImageUrl(item)}
-                      alt={item.name}
-                      width={160}
-                      height={110}
-                      unoptimized
-                      className="block h-16 w-full cursor-zoom-in bg-stone-50 object-contain sm:h-20"
-                    />
-                  </Zoom>
+                  <ZoomableImage
+                    src={buildSourceImageUrl(item)}
+                    alt={item.name}
+                    width={160}
+                    height={110}
+                    className="block h-16 w-full bg-stone-50 object-contain sm:h-20"
+                  />
+                  {item.origin?.type === "gallery" ? (
+                    <div className="border-t border-stone-100 px-3 py-1.5 text-[10px] text-stone-400">
+                      来自图库
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -330,69 +431,71 @@ export function PromptComposer({
 
           <div className="relative px-3 pb-1.5 pt-2 sm:px-4 sm:pb-2 sm:pt-2.5">
             {isMobileComposerCollapsed ? (
-              <>
-                <button
-                  type="button"
-                  className="flex min-h-[22px] w-full items-center px-1 py-0 text-left text-[14px] leading-5 text-stone-400 sm:hidden"
-                  onClick={() => {
-                    setIsMobileComposerExpanded(true);
-                    textareaRef.current?.focus();
-                  }}
-                >
-                  <span className="block w-full truncate">
-                    {imagePrompt.trim() ||
-                      (mode === "generate"
-                        ? "描述你想生成的画面，也可以先上传参考图"
-                        : "描述你想如何修改当前图片")}
-                  </span>
-                </button>
-                <Textarea
-                  ref={textareaRef}
-                  value={imagePrompt}
-                  onChange={(event) => onPromptChange(event.target.value)}
-                  placeholder={
-                    mode === "generate"
+              <button
+                type="button"
+                className="flex min-h-[22px] w-full items-center px-1 py-0 text-left text-[14px] leading-5 text-stone-400 sm:hidden"
+                onClick={focusPromptAfterExpand}
+              >
+                <span className="block w-full truncate">
+                  {draftPrompt.trim() ||
+                    (mode === "generate"
                       ? "描述你想生成的画面，也可以先上传参考图"
-                      : mode === "edit"
-                        ? "描述你想如何修改当前图片"
-                        : "可选：描述你想增强的方向"
-                  }
-                  onPaste={onPromptPaste}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void onSubmit();
-                    }
-                  }}
-                  className="hidden resize-none border-0 bg-transparent !px-1 !pb-1 text-[14px] text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:block sm:min-h-[38px] sm:max-h-[70px] sm:overflow-y-auto sm:!pt-1 sm:pr-10 sm:text-[15px] sm:leading-7"
-                  onFocus={() => setIsMobileComposerExpanded(true)}
-                />
-              </>
-            ) : (
-              <Textarea
-                ref={textareaRef}
-                value={imagePrompt}
-                onChange={(event) => onPromptChange(event.target.value)}
-                placeholder={
-                  mode === "generate"
-                    ? "描述你想生成的画面，也可以先上传参考图"
-                    : mode === "edit"
-                      ? "描述你想如何修改当前图片"
-                      : "可选：描述你想增强的方向"
-                }
-                onPaste={onPromptPaste}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void onSubmit();
-                  }
-                }}
-                className="resize-none border-0 bg-transparent !px-1 !pb-1 text-[14px] text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 min-h-[30px] max-h-[70px] overflow-y-auto !pt-1 pr-10 leading-6 sm:min-h-[38px] sm:text-[15px] sm:leading-7"
-                onFocus={() => setIsMobileComposerExpanded(true)}
-              />
-            )}
+                      : "描述你想如何修改当前图片")}
+                </span>
+              </button>
+            ) : null}
+            <Textarea
+              ref={textareaRef}
+              value={draftPrompt}
+              onChange={(event) => {
+                const value = event.target.value;
+                setDraftPrompt(value);
+                schedulePromptCommit(value);
+              }}
+              placeholder={
+                mode === "generate"
+                  ? "描述你想生成的画面，也可以先上传参考图"
+                  : mode === "edit"
+                    ? "描述你想如何修改当前图片"
+                    : "可选：描述你想增强的方向"
+              }
+              onPaste={onPromptPaste}
+              onKeyDown={handlePromptKeyDown}
+              onCompositionStart={() => setIsPromptComposing(true)}
+              onCompositionEnd={() => setIsPromptComposing(false)}
+              onFocus={() => setIsMobileComposerExpanded(true)}
+              onBlur={() => {
+                commitPromptChange(draftPromptRef.current);
+              }}
+              className={cn(
+                "resize-none border-0 bg-transparent !px-1 !pb-1 text-[14px] text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 overflow-y-auto !pt-1 pr-10 leading-6 sm:min-h-[38px] sm:text-[15px] sm:leading-7",
+                isMobileComposerCollapsed
+                  ? "hidden min-h-[30px] max-h-[70px] sm:block sm:max-h-[70px]"
+                  : "min-h-[30px] max-h-[70px]",
+              )}
+            />
           </div>
           <div className={cn("px-3 pb-1.5 pt-2.5 sm:px-4 sm:pb-2.5 sm:pt-2.5", showMobileExpandedSections ? "block" : "hidden lg:block")}>
+            <div className="mb-2 grid gap-2 sm:grid-cols-3">
+              <Input
+                value={imageTitle}
+                onChange={(event) => onTitleChange(event.target.value)}
+                placeholder="标题（可选）"
+                className="h-10 rounded-2xl border-stone-200 bg-white text-[13px] shadow-none sm:text-sm"
+              />
+              <Input
+                value={imageCategory}
+                onChange={(event) => onCategoryChange(event.target.value)}
+                placeholder="分类（可选）"
+                className="h-10 rounded-2xl border-stone-200 bg-white text-[13px] shadow-none sm:text-sm"
+              />
+              <Input
+                value={imageTags}
+                onChange={(event) => onTagsChange(event.target.value)}
+                placeholder="标签，多个用逗号分隔"
+                className="h-10 rounded-2xl border-stone-200 bg-white text-[13px] shadow-none sm:text-sm"
+              />
+            </div>
             <div className="flex items-end justify-between gap-3">
               <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
                 <Button
@@ -408,12 +511,38 @@ export function PromptComposer({
                   <ImagePlus className="size-3.5" />
                   {mode === "generate" ? "上传参考图" : "上传源图"}
                 </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 rounded-full border-stone-200 bg-white px-2 text-[11px] font-medium text-stone-700 shadow-none sm:h-8 sm:px-2.5 sm:text-xs"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenGalleryPicker("image", flushPromptChange());
+                  }}
+                >
+                  <FolderOpen className="size-3.5" />
+                  从图库选择
+                </Button>
+                <label
+                  className="inline-flex h-7 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 text-[11px] font-medium text-stone-600 sm:h-8 sm:px-2.5 sm:text-xs"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <Checkbox
+                    checked={autoImportUploadedSources}
+                    onCheckedChange={(checked) =>
+                      onAutoImportUploadedSourcesChange(checked === true)
+                    }
+                    className="size-3.5 rounded-[4px]"
+                  />
+                  上传源图入库
+                </label>
 
               </div>
 
               <button
                 type="button"
-                onClick={() => void onSubmit()}
+                onClick={() => void onSubmit(flushPromptChange())}
                 className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-stone-950 text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 dark:bg-[var(--studio-accent-strong)] dark:text-[var(--studio-accent-foreground)] dark:hover:bg-[var(--studio-accent)] dark:disabled:bg-[var(--studio-panel-muted)] dark:disabled:text-[var(--studio-text-muted)] sm:size-9"
                 aria-label="提交图片任务"
               >

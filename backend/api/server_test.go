@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,20 @@ import (
 
 func ptrBool(value bool) *bool {
 	return &value
+}
+
+func pngTestImageBytes() []byte {
+	return []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+		0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
+		0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+		0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d,
+		0xb0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+		0x44, 0xae, 0x42, 0x60, 0x82,
+	}
 }
 
 func TestShouldUseOfficialResponses(t *testing.T) {
@@ -297,6 +312,34 @@ func TestHandleListImageAssetsBuildsItemsFromServerHistory(t *testing.T) {
 				Count:     1,
 				CreatedAt: "2026-05-18T08:00:00Z",
 				Status:    "success",
+				SourceImages: []imagehistory.SourceImage{
+					{
+						ID:   "source-gallery",
+						Role: "image",
+						Name: "gallery.png",
+						URL:  "/v1/files/image/gallery-a.png",
+						Source: &imagehistory.ImageSourceOrigin{
+							Type:      "gallery",
+							Confirmed: true,
+							Gallery: &imagehistory.ImageSourceGalleryReference{
+								AssetID:        "asset-ref-1",
+								ConversationID: "conv-ref",
+								TurnID:         "turn-ref",
+								ImageID:        "img-ref",
+							},
+						},
+					},
+					{
+						ID:   "source-url",
+						Role: "image",
+						Name: "remote.png",
+						Source: &imagehistory.ImageSourceOrigin{
+							Type:      "url",
+							Confirmed: false,
+							URL:       "https://example.com/reference.png",
+						},
+					},
+				},
 				Images: []imagehistory.Image{
 					{
 						ID:            "img-assets",
@@ -339,6 +382,18 @@ func TestHandleListImageAssetsBuildsItemsFromServerHistory(t *testing.T) {
 	}
 	if payload.Items[0].ImageURL != "/v1/files/image/result-a.png" {
 		t.Fatalf("imageUrl = %q, want %q", payload.Items[0].ImageURL, "/v1/files/image/result-a.png")
+	}
+	if len(payload.Items[0].SourceImages) != 2 {
+		t.Fatalf("sourceImages len = %d, want 2", len(payload.Items[0].SourceImages))
+	}
+	if got := payload.Items[0].SourceImages[0].Origin; got == nil || got.Gallery == nil || got.Gallery.AssetID != "asset-ref-1" {
+		t.Fatalf("gallery source origin = %#v, want persisted gallery reference", got)
+	}
+	if got := payload.Items[0].SourceImages[1].Origin; got == nil || got.URL != "https://example.com/reference.png" || got.Confirmed {
+		t.Fatalf("remote source origin = %#v, want unconfirmed source url", got)
+	}
+	if strings.Contains(rec.Body.String(), "data:image") {
+		t.Fatal("asset API response should not include source image dataUrl payloads")
 	}
 }
 
@@ -423,11 +478,131 @@ func TestHandleUpdateImageAssetPersistsMetadata(t *testing.T) {
 	if payload.Item.Category != "海报" {
 		t.Fatalf("category = %q, want %q", payload.Item.Category, "海报")
 	}
+	if payload.Item.Title != "测试图片" {
+		t.Fatalf("title = %q, want %q", payload.Item.Title, "测试图片")
+	}
 	if !payload.Item.Favorite {
 		t.Fatal("favorite = false, want true")
 	}
 	if len(payload.Item.Tags) != 2 {
 		t.Fatalf("tags = %#v, want 2 tags", payload.Item.Tags)
+	}
+}
+
+func TestHandleUpdateImageAssetPersistsTitleAcrossReads(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageConversationStorage = "server"
+	cfg.Storage.ImageDataStorage = "server"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	historyStore, err := imagehistory.NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(history) returned error: %v", err)
+	}
+	defer historyStore.Close()
+
+	_, err = historyStore.Save(context.Background(), imagehistory.Conversation{
+		ID:        "conv-title",
+		Title:     "原始标题",
+		Mode:      "generate",
+		Prompt:    "title persistence",
+		Model:     "gpt-image-2",
+		Count:     1,
+		CreatedAt: "2026-05-18T08:00:00Z",
+		Status:    "success",
+		Turns: []imagehistory.Turn{
+			{
+				ID:        "turn-title",
+				Title:     "原始标题",
+				Mode:      "generate",
+				Prompt:    "title persistence",
+				Model:     "gpt-image-2",
+				Count:     1,
+				CreatedAt: "2026-05-18T08:00:00Z",
+				Status:    "success",
+				Images: []imagehistory.Image{
+					{ID: "img-title", Status: "success", URL: "/v1/files/image/result-title.png"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Save(history) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+
+	seedReq := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	seedReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	seedRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusOK {
+		t.Fatalf("seed status = %d, body = %s", seedRec.Code, seedRec.Body.String())
+	}
+
+	updateBody := `{"title":"已保存标题"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/image/assets/conv-title::turn-title::img-title", strings.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var updatePayload struct {
+		Item imageAssetView `json:"item"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &updatePayload); err != nil {
+		t.Fatalf("Unmarshal(update) returned error: %v", err)
+	}
+	if updatePayload.Item.Title != "已保存标题" {
+		t.Fatalf("updated title = %q, want %q", updatePayload.Item.Title, "已保存标题")
+	}
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "/api/image/assets", nil)
+	verifyReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	verifyRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(verifyRec, verifyReq)
+
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("verify status = %d, body = %s", verifyRec.Code, verifyRec.Body.String())
+	}
+
+	var verifyPayload struct {
+		Items []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(verifyRec.Body.Bytes(), &verifyPayload); err != nil {
+		t.Fatalf("Unmarshal(verify) returned error: %v", err)
+	}
+	if len(verifyPayload.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(verifyPayload.Items))
+	}
+	if verifyPayload.Items[0].Title != "已保存标题" {
+		t.Fatalf("persisted title = %q, want %q", verifyPayload.Items[0].Title, "已保存标题")
+	}
+
+	assetStore, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	defer assetStore.Close()
+
+	saved, err := assetStore.Get(context.Background(), "conv-title::turn-title::img-title")
+	if err != nil {
+		t.Fatalf("Get(asset) returned error: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("saved asset = nil, want persisted asset")
+	}
+	if saved.Title != "已保存标题" {
+		t.Fatalf("db title = %q, want %q", saved.Title, "已保存标题")
 	}
 }
 
@@ -833,6 +1008,543 @@ func TestHandleListImageAssetsReturnsStorageMetadata(t *testing.T) {
 	item := payload.Items[0]
 	if item.Filename != "result-meta.png" || item.SizeBytes != int64(len("metadata-image")) || item.SHA256 == "" {
 		t.Fatalf("storage metadata = %#v, want filename, size, and sha256", item)
+	}
+}
+
+func TestHandleImportImageAssetsSavesFilesAndMetadata(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("category", "参考图"); err != nil {
+		t.Fatalf("WriteField(category) returned error: %v", err)
+	}
+	if err := writer.WriteField("tags", "外来, 素材"); err != nil {
+		t.Fatalf("WriteField(tags) returned error: %v", err)
+	}
+	if err := writer.WriteField("note", "imported note"); err != nil {
+		t.Fatalf("WriteField(note) returned error: %v", err)
+	}
+	part, err := writer.CreateFormFile("images", "sample.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile() returned error: %v", err)
+	}
+	if _, err := part.Write(pngTestImageBytes()); err != nil {
+		t.Fatalf("Write(image) returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/assets/import", &body)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Imported int              `json:"imported"`
+		Items    []imageAssetView `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Imported != 1 || len(payload.Items) != 1 {
+		t.Fatalf("import payload = %#v, want one imported item", payload)
+	}
+	item := payload.Items[0]
+	if item.Title != "sample" || item.Category != "参考图" || item.Note != "imported note" {
+		t.Fatalf("item metadata = %#v, want imported title/category/note", item)
+	}
+	if item.SourceKind != "import" || item.StorageKind != "local" {
+		t.Fatalf("storage kind = source %q storage %q, want import/local", item.SourceKind, item.StorageKind)
+	}
+	if len(item.Tags) != 2 || item.Tags[0] != "外来" || item.Tags[1] != "素材" {
+		t.Fatalf("tags = %#v, want imported tags", item.Tags)
+	}
+	if item.Filename == "" || !strings.HasPrefix(item.Filename, "import-") {
+		t.Fatalf("filename = %q, want import-*", item.Filename)
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, "data", "assets-images", item.Filename)); err != nil {
+		t.Fatalf("expected imported image file: %v", err)
+	}
+
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	defer store.Close()
+	saved, err := store.Get(context.Background(), item.ID)
+	if err != nil {
+		t.Fatalf("Get(imported asset) returned error: %v", err)
+	}
+	if saved == nil || saved.SHA256 == "" || saved.ImageURL != item.ImageURL {
+		t.Fatalf("saved asset = %#v, want persisted file metadata", saved)
+	}
+}
+
+func TestHandleImportImageAssetsRejectsNonImage(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("images", "notes.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile() returned error: %v", err)
+	}
+	if _, err := part.Write([]byte("not an image")); err != nil {
+		t.Fatalf("Write(text) returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/assets/import", &body)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Imported int                           `json:"imported"`
+		Failed   []imageAssetImportFailureView `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Imported != 0 || len(payload.Failed) != 1 {
+		t.Fatalf("payload = %#v, want one failed import", payload)
+	}
+}
+
+func TestHandleImportImageAssetsReturnsPartialFailureForOversizedFile(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.App.MaxUploadSizeMB = 1
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	oversizedPayload := append([]byte{}, pngTestImageBytes()...)
+	oversizedPayload = append(oversizedPayload, bytes.Repeat([]byte{0}, 1<<20)...)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	smallPart, err := writer.CreateFormFile("images[]", "small.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(small) returned error: %v", err)
+	}
+	if _, err := smallPart.Write(pngTestImageBytes()); err != nil {
+		t.Fatalf("Write(small) returned error: %v", err)
+	}
+	largePart, err := writer.CreateFormFile("file", "large.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(large) returned error: %v", err)
+	}
+	if _, err := largePart.Write(oversizedPayload); err != nil {
+		t.Fatalf("Write(large) returned error: %v", err)
+	}
+	if err := writer.WriteField("category", "参考图"); err != nil {
+		t.Fatalf("WriteField(category) returned error: %v", err)
+	}
+	if err := writer.WriteField("tags", "超限, 导入"); err != nil {
+		t.Fatalf("WriteField(tags) returned error: %v", err)
+	}
+	if err := writer.WriteField("note", "partial import"); err != nil {
+		t.Fatalf("WriteField(note) returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/assets/import", &body)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Imported int                           `json:"imported"`
+		Items    []imageAssetView              `json:"items"`
+		Failed   []imageAssetImportFailureView `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Imported != 1 || len(payload.Items) != 1 || len(payload.Failed) != 1 {
+		t.Fatalf("payload = %#v, want one imported item and one failure", payload)
+	}
+	if payload.Failed[0].Name != "large.png" || !strings.Contains(payload.Failed[0].Error, "exceeds") {
+		t.Fatalf("failed[0] = %#v, want oversized file failure", payload.Failed[0])
+	}
+	item := payload.Items[0]
+	if item.Category != "参考图" || item.Note != "partial import" {
+		t.Fatalf("item metadata = %#v, want parsed multipart fields", item)
+	}
+	if len(item.Tags) != 2 || item.Tags[0] != "导入" || item.Tags[1] != "超限" {
+		t.Fatalf("item tags = %#v, want parsed tags", item.Tags)
+	}
+
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	defer store.Close()
+	items, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("stored items len = %d, want 1", len(items))
+	}
+}
+
+func TestHandleImportImageAssetsReturnsFailuresWhenAllFilesAreOversized(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.App.MaxUploadSizeMB = 1
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	oversizedPayload := append([]byte{}, pngTestImageBytes()...)
+	oversizedPayload = append(oversizedPayload, bytes.Repeat([]byte{0}, 1<<20)...)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("images", "large.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(large) returned error: %v", err)
+	}
+	if _, err := part.Write(oversizedPayload); err != nil {
+		t.Fatalf("Write(large) returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/assets/import", &body)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Error    string                        `json:"error"`
+		Imported int                           `json:"imported"`
+		Items    []imageAssetView              `json:"items"`
+		Failed   []imageAssetImportFailureView `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Error != "" {
+		t.Fatalf("error = %q, want structured import failures", payload.Error)
+	}
+	if payload.Imported != 0 || len(payload.Items) != 0 || len(payload.Failed) != 1 {
+		t.Fatalf("payload = %#v, want one structured oversized failure", payload)
+	}
+	if payload.Failed[0].Name != "large.png" || !strings.Contains(payload.Failed[0].Error, "exceeds") {
+		t.Fatalf("failed[0] = %#v, want oversized file failure", payload.Failed[0])
+	}
+}
+
+func TestHandleDeleteImageAssetKeepsSourceFileByDefault(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+	imageDir := cfg.ResolvePath(cfg.Storage.ImageDir)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imageDir) returned error: %v", err)
+	}
+	filename := "result-delete-default.png"
+	if err := os.WriteFile(filepath.Join(imageDir, filename), pngTestImageBytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile(image) returned error: %v", err)
+	}
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	_, err = store.Save(context.Background(), imageassets.Asset{
+		ID:             "asset-delete-default",
+		Title:          "Delete default",
+		Mode:           "generate",
+		Model:          "gpt-image-2",
+		CreatedAt:      "2026-05-18T08:00:00Z",
+		Status:         "success",
+		ImageURL:       imageassets.ImageFileURL(filename),
+		Filename:       filename,
+		StorageKind:    "local",
+		ConversationID: "conv-delete-default",
+		TurnID:         "turn-delete-default",
+		ImageID:        "img-delete-default",
+	})
+	if err != nil {
+		t.Fatalf("Save(asset) returned error: %v", err)
+	}
+	_ = store.Close()
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/image/assets/asset-delete-default", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		DeletedFile bool `json:"deletedFile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.DeletedFile {
+		t.Fatalf("deletedFile = true, want false")
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, filename)); err != nil {
+		t.Fatalf("expected source file to remain: %v", err)
+	}
+	store, err = imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) after delete returned error: %v", err)
+	}
+	defer store.Close()
+	item, err := store.Get(context.Background(), "asset-delete-default")
+	if err != nil {
+		t.Fatalf("Get(deleted asset) returned error: %v", err)
+	}
+	if item != nil {
+		t.Fatalf("deleted asset = %#v, want nil", item)
+	}
+	if saved, err := store.Save(context.Background(), imageassets.Asset{
+		ID:             "asset-delete-default",
+		Title:          "Resynced",
+		Mode:           "generate",
+		Model:          "gpt-image-2",
+		CreatedAt:      "2026-05-18T08:00:00Z",
+		Status:         "success",
+		ImageURL:       imageassets.ImageFileURL(filename),
+		Filename:       filename,
+		ConversationID: "conv-delete-default",
+		TurnID:         "turn-delete-default",
+		ImageID:        "img-delete-default",
+	}); err != nil || saved != nil {
+		t.Fatalf("Save(deleted history asset) = %#v, %v; want skipped nil", saved, err)
+	}
+}
+
+func TestHandleDeleteImageAssetCanRemoveUnreferencedSourceFile(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+	imageDir := cfg.ResolvePath(cfg.Storage.ImageDir)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imageDir) returned error: %v", err)
+	}
+	filename := "import-delete-source.png"
+	if err := os.WriteFile(filepath.Join(imageDir, filename), pngTestImageBytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile(image) returned error: %v", err)
+	}
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	_, err = store.Save(context.Background(), imageassets.Asset{
+		ID:          "asset-delete-source",
+		Title:       "Delete source",
+		Mode:        "import",
+		Model:       "external",
+		CreatedAt:   "2026-05-18T08:00:00Z",
+		Status:      "success",
+		ImageURL:    imageassets.ImageFileURL(filename),
+		Filename:    filename,
+		StorageKind: "local",
+		SourceKind:  "import",
+	})
+	if err != nil {
+		t.Fatalf("Save(asset) returned error: %v", err)
+	}
+	_ = store.Close()
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/image/assets/asset-delete-source?delete_file=true", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		DeletedFile bool `json:"deletedFile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if !payload.DeletedFile {
+		t.Fatalf("deletedFile = false, want true")
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, filename)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source file stat err = %v, want not exist", err)
+	}
+}
+
+func TestHandleCleanupImageAssetsScansAndCleansOrphansAndMissingRecords(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.Storage.ImageDir = "data/assets-images"
+	imageDir := cfg.ResolvePath(cfg.Storage.ImageDir)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imageDir) returned error: %v", err)
+	}
+	referencedFile := "referenced-cleanup.png"
+	orphanFile := "orphan-cleanup.png"
+	missingFile := "missing-cleanup.png"
+	for _, filename := range []string{referencedFile, orphanFile} {
+		if err := os.WriteFile(filepath.Join(imageDir, filename), pngTestImageBytes(), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) returned error: %v", filename, err)
+		}
+	}
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	for _, item := range []imageassets.Asset{
+		{
+			ID:          "asset-cleanup-referenced",
+			Title:       "Referenced",
+			Mode:        "import",
+			Model:       "external",
+			CreatedAt:   "2026-05-18T08:00:00Z",
+			Status:      "success",
+			ImageURL:    imageassets.ImageFileURL(referencedFile),
+			Filename:    referencedFile,
+			StorageKind: "local",
+			SourceKind:  "import",
+		},
+		{
+			ID:          "asset-cleanup-missing",
+			Title:       "Missing",
+			Mode:        "import",
+			Model:       "external",
+			CreatedAt:   "2026-05-18T08:00:01Z",
+			Status:      "success",
+			ImageURL:    imageassets.ImageFileURL(missingFile),
+			Filename:    missingFile,
+			StorageKind: "local",
+			SourceKind:  "import",
+		},
+	} {
+		if _, err := store.Save(context.Background(), item); err != nil {
+			t.Fatalf("Save(%s) returned error: %v", item.ID, err)
+		}
+	}
+	_ = store.Close()
+
+	server := NewServer(cfg, nil, nil)
+	scanReq := httptest.NewRequest(http.MethodPost, "/api/image/assets/cleanup", strings.NewReader(`{"dryRun":true}`))
+	scanReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	scanReq.Header.Set("Content-Type", "application/json")
+	scanRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(scanRec, scanReq)
+
+	if scanRec.Code != http.StatusOK {
+		t.Fatalf("scan status = %d, body = %s", scanRec.Code, scanRec.Body.String())
+	}
+	var scanPayload imageAssetCleanupResult
+	if err := json.Unmarshal(scanRec.Body.Bytes(), &scanPayload); err != nil {
+		t.Fatalf("Unmarshal(scan) returned error: %v", err)
+	}
+	if len(scanPayload.OrphanFiles) != 1 || scanPayload.OrphanFiles[0].Filename != orphanFile {
+		t.Fatalf("orphan files = %#v, want %s", scanPayload.OrphanFiles, orphanFile)
+	}
+	if len(scanPayload.MissingAssets) != 1 || scanPayload.MissingAssets[0].ID != "asset-cleanup-missing" {
+		t.Fatalf("missing assets = %#v, want asset-cleanup-missing", scanPayload.MissingAssets)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, orphanFile)); err != nil {
+		t.Fatalf("dry-run removed orphan file: %v", err)
+	}
+
+	cleanReq := httptest.NewRequest(http.MethodPost, "/api/image/assets/cleanup", strings.NewReader(`{"dryRun":false}`))
+	cleanReq.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	cleanReq.Header.Set("Content-Type", "application/json")
+	cleanRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(cleanRec, cleanReq)
+
+	if cleanRec.Code != http.StatusOK {
+		t.Fatalf("clean status = %d, body = %s", cleanRec.Code, cleanRec.Body.String())
+	}
+	var cleanPayload imageAssetCleanupResult
+	if err := json.Unmarshal(cleanRec.Body.Bytes(), &cleanPayload); err != nil {
+		t.Fatalf("Unmarshal(clean) returned error: %v", err)
+	}
+	if len(cleanPayload.RemovedFiles) != 1 || cleanPayload.RemovedFiles[0] != orphanFile {
+		t.Fatalf("removed files = %#v, want %s", cleanPayload.RemovedFiles, orphanFile)
+	}
+	if len(cleanPayload.RemovedAssetIDs) != 1 || cleanPayload.RemovedAssetIDs[0] != "asset-cleanup-missing" {
+		t.Fatalf("removed asset ids = %#v, want asset-cleanup-missing", cleanPayload.RemovedAssetIDs)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, orphanFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan file stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, referencedFile)); err != nil {
+		t.Fatalf("referenced file should remain: %v", err)
+	}
+	store, err = imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) after cleanup returned error: %v", err)
+	}
+	defer store.Close()
+	if item, err := store.Get(context.Background(), "asset-cleanup-missing"); err != nil || item != nil {
+		t.Fatalf("Get(missing asset) = %#v, %v; want nil", item, err)
+	}
+	if item, err := store.Get(context.Background(), "asset-cleanup-referenced"); err != nil || item == nil {
+		t.Fatalf("Get(referenced asset) = %#v, %v; want item", item, err)
 	}
 }
 

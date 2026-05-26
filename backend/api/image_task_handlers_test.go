@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"chatgpt2api/handler"
+	"chatgpt2api/internal/imagehistory"
 )
 
 func TestCreateImageTaskRunsToSuccess(t *testing.T) {
@@ -358,6 +359,75 @@ func TestCreateImageGenerateTaskAutoPaidRequiresPaidAccount(t *testing.T) {
 	}
 	if reqErr.code != "paid_resolution_requires_paid_account" {
 		t.Fatalf("request error code = %q, want paid_resolution_requires_paid_account", reqErr.code)
+	}
+}
+
+func TestCreateImageTaskPreservesMetadataAndSourceOrigins(t *testing.T) {
+	server, _ := newImageModeCompatTestServerWithOptions(t, imageModeCompatScenario{
+		imageMode:   "studio",
+		accountType: "Free",
+		freeRoute:   "legacy",
+		freeModel:   "auto",
+		paidRoute:   "responses",
+		paidModel:   "gpt-5.4-mini",
+	}, compatTestServerOptions{})
+
+	galleryIndex := 3
+	task, err := server.imageTasks.createTask(createImageTaskRequest{
+		ConversationID: "conv-meta",
+		TurnID:         "turn-meta",
+		Mode:           "edit",
+		Prompt:         "metadata task",
+		Model:          "gpt-image-2",
+		Count:          1,
+		Category:       "海报",
+		Tags:           []string{"海报", " 横幅 ", "海报"},
+		SourceImages: []imageTaskSourceImagePayload{
+			{
+				ID:       "gallery-source",
+				Role:     "image",
+				Name:     "gallery.png",
+				URL:      "/v1/files/image/gallery.png",
+				Category: "参考图",
+				Tags:     []string{"图库", "已选"},
+				Source: &imagehistory.ImageSourceOrigin{
+					Type:      "gallery",
+					Confirmed: true,
+					Gallery: &imagehistory.ImageSourceGalleryReference{
+						AssetID: "asset-3",
+						Index:   &galleryIndex,
+					},
+				},
+			},
+			{
+				ID:   "pending-file",
+				Role: "image",
+				Name: "pending.png",
+				Source: &imagehistory.ImageSourceOrigin{
+					Type:      "file",
+					Confirmed: false,
+					FilePath:  `C:\tmp\pending.png`,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("createTask() returned error: %v", err)
+	}
+	if task.Category != "海报" {
+		t.Fatalf("task category = %q, want 海报", task.Category)
+	}
+	if len(task.Tags) != 2 || task.Tags[0] != "海报" || task.Tags[1] != "横幅" {
+		t.Fatalf("task tags = %#v, want normalized tags", task.Tags)
+	}
+	if len(task.SourceImages) != 2 {
+		t.Fatalf("task sourceImages len = %d, want 2", len(task.SourceImages))
+	}
+	if got := task.SourceImages[0].Source; got == nil || got.Gallery == nil || got.Gallery.AssetID != "asset-3" {
+		t.Fatalf("gallery source = %#v, want gallery asset reference", got)
+	}
+	if got := task.SourceImages[1].Source; got == nil || got.FilePath != `C:\tmp\pending.png` || got.Confirmed {
+		t.Fatalf("pending source = %#v, want unconfirmed file path", got)
 	}
 }
 
