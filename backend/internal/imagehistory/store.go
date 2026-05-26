@@ -25,11 +25,81 @@ const (
 )
 
 type SourceImage struct {
-	ID      string `json:"id"`
-	Role    string `json:"role"`
-	Name    string `json:"name"`
-	DataURL string `json:"dataUrl,omitempty"`
-	URL     string `json:"url,omitempty"`
+	ID       string             `json:"id"`
+	Role     string             `json:"role"`
+	Name     string             `json:"name"`
+	DataURL  string             `json:"dataUrl,omitempty"`
+	URL      string             `json:"url,omitempty"`
+	Category string             `json:"category,omitempty"`
+	Tags     []string           `json:"tags,omitempty"`
+	Source   *ImageSourceOrigin `json:"source,omitempty"`
+}
+
+type ImageSourceOrigin struct {
+	Type      string                       `json:"type,omitempty"`
+	Confirmed bool                         `json:"confirmed,omitempty"`
+	URL       string                       `json:"url,omitempty"`
+	FilePath  string                       `json:"filePath,omitempty"`
+	Gallery   *ImageSourceGalleryReference `json:"gallery,omitempty"`
+}
+
+type ImageSourceGalleryReference struct {
+	AssetID        string `json:"assetId,omitempty"`
+	Index          *int   `json:"index,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	TurnID         string `json:"turnId,omitempty"`
+	ImageID        string `json:"imageId,omitempty"`
+}
+
+func buildAssetSourceImages(items []SourceImage) []imageassets.AssetSourceImage {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]imageassets.AssetSourceImage, 0, len(items))
+	for _, item := range items {
+		origin := buildAssetSourceOrigin(item.Source, item.URL)
+		reference := imageassets.AssetSourceImage{
+			ID:       cleanID(item.ID),
+			Role:     strings.TrimSpace(item.Role),
+			Name:     strings.TrimSpace(item.Name),
+			URL:      strings.TrimSpace(item.URL),
+			Category: strings.TrimSpace(item.Category),
+			Tags:     normalizeStringList(item.Tags),
+			Origin:   origin,
+			Source:   origin,
+		}
+		if reference.ID == "" && reference.Role == "" && reference.Name == "" && reference.URL == "" && reference.Category == "" && len(reference.Tags) == 0 && reference.Origin == nil {
+			continue
+		}
+		result = append(result, reference)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func buildAssetSourceOrigin(origin *ImageSourceOrigin, fallbackURL string) *imageassets.AssetSourceOrigin {
+	normalized := normalizeSourceImageOrigin(origin, fallbackURL)
+	if normalized == nil {
+		return nil
+	}
+	result := &imageassets.AssetSourceOrigin{
+		Type:      normalized.Type,
+		Confirmed: normalized.Confirmed,
+		URL:       normalized.URL,
+		FilePath:  normalized.FilePath,
+	}
+	if normalized.Gallery != nil {
+		result.Gallery = &imageassets.AssetSourceGalleryReference{
+			AssetID:        normalized.Gallery.AssetID,
+			Index:          normalized.Gallery.Index,
+			ConversationID: normalized.Gallery.ConversationID,
+			TurnID:         normalized.Gallery.TurnID,
+			ImageID:        normalized.Gallery.ImageID,
+		}
+	}
+	return result
 }
 
 type Image struct {
@@ -56,6 +126,8 @@ type Turn struct {
 	Size         string        `json:"size,omitempty"`
 	Quality      string        `json:"quality,omitempty"`
 	Scale        string        `json:"scale,omitempty"`
+	Category     string        `json:"category,omitempty"`
+	Tags         []string      `json:"tags,omitempty"`
 	SourceImages []SourceImage `json:"sourceImages,omitempty"`
 	Images       []Image       `json:"images"`
 	CreatedAt    string        `json:"createdAt"`
@@ -73,6 +145,8 @@ type Conversation struct {
 	Size         string        `json:"size,omitempty"`
 	Quality      string        `json:"quality,omitempty"`
 	Scale        string        `json:"scale,omitempty"`
+	Category     string        `json:"category,omitempty"`
+	Tags         []string      `json:"tags,omitempty"`
 	SourceImages []SourceImage `json:"sourceImages,omitempty"`
 	Images       []Image       `json:"images"`
 	CreatedAt    string        `json:"createdAt"`
@@ -246,6 +320,8 @@ func (s *Store) normalizeConversation(conversation Conversation) (Conversation, 
 			Size:         conversation.Size,
 			Quality:      conversation.Quality,
 			Scale:        conversation.Scale,
+			Category:     conversation.Category,
+			Tags:         append([]string(nil), conversation.Tags...),
 			SourceImages: conversation.SourceImages,
 			Images:       conversation.Images,
 			CreatedAt:    conversation.CreatedAt,
@@ -261,11 +337,16 @@ func (s *Store) normalizeConversation(conversation Conversation) (Conversation, 
 		if turn.CreatedAt == "" {
 			turn.CreatedAt = conversation.CreatedAt
 		}
+		turn.Category = strings.TrimSpace(turn.Category)
+		turn.Tags = normalizeStringList(turn.Tags)
 		for sourceIndex := range turn.SourceImages {
 			source := &turn.SourceImages[sourceIndex]
 			if source.ID == "" {
 				source.ID = fmt.Sprintf("%s-source-%d", turn.ID, sourceIndex)
 			}
+			source.Category = strings.TrimSpace(source.Category)
+			source.Tags = normalizeStringList(source.Tags)
+			source.Source = normalizeSourceImageOrigin(source.Source, source.URL)
 			if source.URL == "" && strings.TrimSpace(source.DataURL) != "" {
 				url, err := s.saveDataURLAsset(source.DataURL, "source", source.Name)
 				if err != nil {
@@ -306,6 +387,8 @@ func (s *Store) normalizeConversation(conversation Conversation) (Conversation, 
 	conversation.Size = latest.Size
 	conversation.Quality = latest.Quality
 	conversation.Scale = latest.Scale
+	conversation.Category = latest.Category
+	conversation.Tags = normalizeStringList(latest.Tags)
 	conversation.SourceImages = latest.SourceImages
 	conversation.Images = latest.Images
 	conversation.CreatedAt = latest.CreatedAt
@@ -443,6 +526,8 @@ func (s *Store) extractImageAssets(conversation Conversation) []imageassets.Asse
 			Prompt:    conversation.Prompt,
 			Model:     conversation.Model,
 			Count:     conversation.Count,
+			Category:  conversation.Category,
+			Tags:      append([]string(nil), conversation.Tags...),
 			Images:    conversation.Images,
 			CreatedAt: conversation.CreatedAt,
 			Status:    conversation.Status,
@@ -477,6 +562,9 @@ func (s *Store) extractImageAssets(conversation Conversation) []imageassets.Asse
 				FileID:          strings.TrimSpace(image.FileID),
 				GenID:           strings.TrimSpace(image.GenID),
 				SourceAccountID: strings.TrimSpace(image.SourceAccountID),
+				Category:        strings.TrimSpace(turn.Category),
+				Tags:            append([]string(nil), turn.Tags...),
+				SourceImages:    buildAssetSourceImages(turn.SourceImages),
 			}
 			asset = s.enrichAssetFileMetadata(asset)
 			result = append(result, asset)
@@ -547,6 +635,96 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func normalizeSourceImageOrigin(origin *ImageSourceOrigin, fallbackURL string) *ImageSourceOrigin {
+	if origin == nil {
+		if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+			return &ImageSourceOrigin{
+				Type:      "url",
+				Confirmed: true,
+				URL:       trimmed,
+			}
+		}
+		return nil
+	}
+	copy := *origin
+	copy.Type = strings.TrimSpace(copy.Type)
+	copy.URL = strings.TrimSpace(copy.URL)
+	copy.FilePath = strings.TrimSpace(copy.FilePath)
+	if copy.Gallery != nil {
+		gallery := *copy.Gallery
+		gallery.AssetID = cleanID(gallery.AssetID)
+		gallery.ConversationID = cleanID(gallery.ConversationID)
+		gallery.TurnID = cleanID(gallery.TurnID)
+		gallery.ImageID = cleanID(gallery.ImageID)
+		if gallery.AssetID == "" && gallery.ConversationID == "" && gallery.TurnID == "" && gallery.ImageID == "" && gallery.Index == nil {
+			copy.Gallery = nil
+		} else {
+			copy.Gallery = &gallery
+		}
+	}
+	if copy.Type == "" {
+		switch {
+		case copy.Gallery != nil:
+			copy.Type = "gallery"
+		case copy.FilePath != "":
+			copy.Type = "file"
+		case copy.URL != "":
+			copy.Type = "url"
+		case strings.TrimSpace(fallbackURL) != "":
+			copy.Type = "url"
+			copy.URL = strings.TrimSpace(fallbackURL)
+			copy.Confirmed = true
+		}
+	}
+	switch copy.Type {
+	case "gallery":
+		if copy.Gallery == nil {
+			return nil
+		}
+	case "file":
+		if copy.FilePath == "" {
+			return nil
+		}
+	case "url":
+		if copy.URL == "" {
+			if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+				copy.URL = trimmed
+				copy.Confirmed = true
+			} else {
+				return nil
+			}
+		}
+	default:
+		if copy.Gallery == nil && copy.FilePath == "" && copy.URL == "" {
+			return nil
+		}
+	}
+	return &copy
 }
 
 type fileBackend struct {

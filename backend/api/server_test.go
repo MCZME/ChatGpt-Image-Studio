@@ -312,6 +312,34 @@ func TestHandleListImageAssetsBuildsItemsFromServerHistory(t *testing.T) {
 				Count:     1,
 				CreatedAt: "2026-05-18T08:00:00Z",
 				Status:    "success",
+				SourceImages: []imagehistory.SourceImage{
+					{
+						ID:   "source-gallery",
+						Role: "image",
+						Name: "gallery.png",
+						URL:  "/v1/files/image/gallery-a.png",
+						Source: &imagehistory.ImageSourceOrigin{
+							Type:      "gallery",
+							Confirmed: true,
+							Gallery: &imagehistory.ImageSourceGalleryReference{
+								AssetID:        "asset-ref-1",
+								ConversationID: "conv-ref",
+								TurnID:         "turn-ref",
+								ImageID:        "img-ref",
+							},
+						},
+					},
+					{
+						ID:   "source-url",
+						Role: "image",
+						Name: "remote.png",
+						Source: &imagehistory.ImageSourceOrigin{
+							Type:      "url",
+							Confirmed: false,
+							URL:       "https://example.com/reference.png",
+						},
+					},
+				},
 				Images: []imagehistory.Image{
 					{
 						ID:            "img-assets",
@@ -354,6 +382,18 @@ func TestHandleListImageAssetsBuildsItemsFromServerHistory(t *testing.T) {
 	}
 	if payload.Items[0].ImageURL != "/v1/files/image/result-a.png" {
 		t.Fatalf("imageUrl = %q, want %q", payload.Items[0].ImageURL, "/v1/files/image/result-a.png")
+	}
+	if len(payload.Items[0].SourceImages) != 2 {
+		t.Fatalf("sourceImages len = %d, want 2", len(payload.Items[0].SourceImages))
+	}
+	if got := payload.Items[0].SourceImages[0].Origin; got == nil || got.Gallery == nil || got.Gallery.AssetID != "asset-ref-1" {
+		t.Fatalf("gallery source origin = %#v, want persisted gallery reference", got)
+	}
+	if got := payload.Items[0].SourceImages[1].Origin; got == nil || got.URL != "https://example.com/reference.png" || got.Confirmed {
+		t.Fatalf("remote source origin = %#v, want unconfirmed source url", got)
+	}
+	if strings.Contains(rec.Body.String(), "data:image") {
+		t.Fatal("asset API response should not include source image dataUrl payloads")
 	}
 }
 

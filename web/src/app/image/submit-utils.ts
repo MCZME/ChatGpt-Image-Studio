@@ -13,7 +13,17 @@ import type {
   StoredSourceImage,
 } from "@/store/image-conversations";
 
-export function buildConversationTitle(mode: ImageMode, prompt: string, scale = "") {
+export function buildConversationTitle(
+  mode: ImageMode,
+  prompt: string,
+  scale = "",
+  preferredTitle = "",
+) {
+  const title = preferredTitle.trim();
+  if (title) {
+    const prefix = mode === "generate" ? "生成" : "编辑";
+    return title.length <= 20 ? `${prefix} · ${title}` : `${prefix} · ${title.slice(0, 20)}...`;
+  }
   const trimmed = prompt.trim();
   const prefix = mode === "generate" ? "生成" : "编辑";
   if (!trimmed) {
@@ -37,6 +47,8 @@ export function createConversationTurn(payload: {
   title: string;
   mode: ImageMode;
   prompt: string;
+  category?: string;
+  tags?: string[];
   model: ImageModel;
   count: number;
   size?: string;
@@ -55,6 +67,8 @@ export function createConversationTurn(payload: {
     title: payload.title,
     mode: payload.mode,
     prompt: payload.prompt,
+    category: payload.category,
+    tags: payload.tags ?? [],
     model: payload.model,
     count: payload.count,
     size: payload.size,

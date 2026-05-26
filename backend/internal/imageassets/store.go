@@ -3,6 +3,7 @@ package imageassets
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,34 +18,62 @@ import (
 const defaultAssetSQLitePath = "data/image-assets.db"
 
 type Asset struct {
-	ID              string   `json:"id"`
-	Title           string   `json:"title"`
-	Prompt          string   `json:"prompt"`
-	RevisedPrompt   string   `json:"revisedPrompt,omitempty"`
-	Mode            string   `json:"mode"`
-	Model           string   `json:"model"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt,omitempty"`
-	ConversationID  string   `json:"conversationId,omitempty"`
-	TurnID          string   `json:"turnId,omitempty"`
-	ImageID         string   `json:"imageId,omitempty"`
-	Status          string   `json:"status,omitempty"`
-	ImageURL        string   `json:"imageUrl,omitempty"`
-	ImageB64JSON    string   `json:"imageB64Json,omitempty"`
-	Filename        string   `json:"filename,omitempty"`
-	MIMEType        string   `json:"mimeType,omitempty"`
-	SizeBytes       int64    `json:"sizeBytes,omitempty"`
-	SHA256          string   `json:"sha256,omitempty"`
-	StorageKind     string   `json:"storageKind,omitempty"`
-	SourceKind      string   `json:"sourceKind,omitempty"`
-	OriginalURL     string   `json:"originalUrl,omitempty"`
-	FileID          string   `json:"fileId,omitempty"`
-	GenID           string   `json:"genId,omitempty"`
-	SourceAccountID string   `json:"sourceAccountId,omitempty"`
-	Category        string   `json:"category,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	Favorite        bool     `json:"favorite,omitempty"`
+	ID              string             `json:"id"`
+	Title           string             `json:"title"`
+	Prompt          string             `json:"prompt"`
+	RevisedPrompt   string             `json:"revisedPrompt,omitempty"`
+	Mode            string             `json:"mode"`
+	Model           string             `json:"model"`
+	CreatedAt       string             `json:"createdAt"`
+	UpdatedAt       string             `json:"updatedAt,omitempty"`
+	ConversationID  string             `json:"conversationId,omitempty"`
+	TurnID          string             `json:"turnId,omitempty"`
+	ImageID         string             `json:"imageId,omitempty"`
+	Status          string             `json:"status,omitempty"`
+	ImageURL        string             `json:"imageUrl,omitempty"`
+	ImageB64JSON    string             `json:"imageB64Json,omitempty"`
+	Filename        string             `json:"filename,omitempty"`
+	MIMEType        string             `json:"mimeType,omitempty"`
+	SizeBytes       int64              `json:"sizeBytes,omitempty"`
+	SHA256          string             `json:"sha256,omitempty"`
+	StorageKind     string             `json:"storageKind,omitempty"`
+	SourceKind      string             `json:"sourceKind,omitempty"`
+	OriginalURL     string             `json:"originalUrl,omitempty"`
+	FileID          string             `json:"fileId,omitempty"`
+	GenID           string             `json:"genId,omitempty"`
+	SourceAccountID string             `json:"sourceAccountId,omitempty"`
+	Category        string             `json:"category,omitempty"`
+	Tags            []string           `json:"tags,omitempty"`
+	SourceImages    []AssetSourceImage `json:"sourceImages,omitempty"`
+	Note            string             `json:"note,omitempty"`
+	Favorite        bool               `json:"favorite,omitempty"`
+}
+
+type AssetSourceImage struct {
+	ID       string             `json:"id,omitempty"`
+	Role     string             `json:"role,omitempty"`
+	Name     string             `json:"name,omitempty"`
+	URL      string             `json:"url,omitempty"`
+	Category string             `json:"category,omitempty"`
+	Tags     []string           `json:"tags,omitempty"`
+	Origin   *AssetSourceOrigin `json:"origin,omitempty"`
+	Source   *AssetSourceOrigin `json:"source,omitempty"`
+}
+
+type AssetSourceOrigin struct {
+	Type      string                       `json:"type,omitempty"`
+	Confirmed bool                         `json:"confirmed,omitempty"`
+	URL       string                       `json:"url,omitempty"`
+	FilePath  string                       `json:"filePath,omitempty"`
+	Gallery   *AssetSourceGalleryReference `json:"gallery,omitempty"`
+}
+
+type AssetSourceGalleryReference struct {
+	AssetID        string `json:"assetId,omitempty"`
+	Index          *int   `json:"index,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	TurnID         string `json:"turnId,omitempty"`
+	ImageID        string `json:"imageId,omitempty"`
 }
 
 type MetadataPatch struct {
@@ -148,6 +177,7 @@ var assetColumnSpecs = []assetColumnSpec{
 	{Name: "gen_id", SQL: "gen_id TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "source_account_id", SQL: "source_account_id TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "category", SQL: "category TEXT NOT NULL DEFAULT ''", Required: true},
+	{Name: "source_images", SQL: "source_images TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "note", SQL: "note TEXT NOT NULL DEFAULT ''", Required: true},
 	{Name: "favorite", SQL: "favorite INTEGER NOT NULL DEFAULT 0", Required: true},
 }
@@ -430,6 +460,7 @@ func (s *Store) hasCompatibleAssetSchema() (bool, error) {
 		"gen_id",
 		"source_account_id",
 		"category",
+		"source_images",
 		"note",
 		"favorite",
 	}
@@ -579,7 +610,7 @@ func (s *Store) ListPage(ctx context.Context, filter FilterOptions) (ListResult,
 			a.id, a.title, a.prompt, a.revised_prompt, a.mode, a.model, a.created_at, a.updated_at,
 			a.conversation_id, a.turn_id, a.image_id, a.status, a.image_url, a.image_b64_json,
 			a.filename, a.mime_type, a.size_bytes, a.sha256, a.storage_kind, a.source_kind, a.original_url,
-			a.file_id, a.gen_id, a.source_account_id, a.category, a.note, a.favorite
+			a.file_id, a.gen_id, a.source_account_id, a.category, a.source_images, a.note, a.favorite
 		FROM image_assets a`
 	joins := []string{}
 	conditions := []string{}
@@ -689,7 +720,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Asset, error) {
 		SELECT id, title, prompt, revised_prompt, mode, model, created_at, updated_at,
 		       conversation_id, turn_id, image_id, status, image_url, image_b64_json,
 		       filename, mime_type, size_bytes, sha256, storage_kind, source_kind, original_url,
-		       file_id, gen_id, source_account_id, category, note, favorite
+		       file_id, gen_id, source_account_id, category, source_images, note, favorite
 		FROM image_assets
 		WHERE id = ?`, cleanID(id))
 	item, err := scanAssetRow(row)
@@ -756,6 +787,9 @@ func (s *Store) Save(ctx context.Context, asset Asset) (*Asset, error) {
 		}
 		if normalized.OriginalURL == "" {
 			normalized.OriginalURL = current.OriginalURL
+		}
+		if len(normalized.SourceImages) == 0 {
+			normalized.SourceImages = append([]AssetSourceImage(nil), current.SourceImages...)
 		}
 	} else if err != nil {
 		return nil, err
@@ -1094,8 +1128,8 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 			id, title, prompt, revised_prompt, mode, model, created_at, updated_at,
 			conversation_id, turn_id, image_id, status, image_url, image_b64_json,
 			filename, mime_type, size_bytes, sha256, storage_kind, source_kind, original_url,
-			file_id, gen_id, source_account_id, category, note, favorite
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			file_id, gen_id, source_account_id, category, source_images, note, favorite
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = excluded.title,
 			prompt = excluded.prompt,
@@ -1121,6 +1155,7 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 			gen_id = excluded.gen_id,
 			source_account_id = excluded.source_account_id,
 			category = excluded.category,
+			source_images = excluded.source_images,
 			note = excluded.note,
 			favorite = excluded.favorite`,
 		normalized.ID,
@@ -1148,6 +1183,7 @@ func (s *Store) save(ctx context.Context, asset Asset) error {
 		normalized.GenID,
 		normalized.SourceAccountID,
 		normalized.Category,
+		mustMarshalSourceImages(normalized.SourceImages),
 		normalized.Note,
 		boolToInt(normalized.Favorite),
 	)
@@ -1347,6 +1383,7 @@ type rowScanner interface {
 func scanAssetRow(scanner rowScanner) (Asset, error) {
 	var item Asset
 	var favorite int
+	var sourceImagesRaw string
 	err := scanner.Scan(
 		&item.ID,
 		&item.Title,
@@ -1373,6 +1410,7 @@ func scanAssetRow(scanner rowScanner) (Asset, error) {
 		&item.GenID,
 		&item.SourceAccountID,
 		&item.Category,
+		&sourceImagesRaw,
 		&item.Note,
 		&favorite,
 	)
@@ -1380,6 +1418,7 @@ func scanAssetRow(scanner rowScanner) (Asset, error) {
 		return Asset{}, err
 	}
 	item.Favorite = favorite != 0
+	item.SourceImages = unmarshalSourceImages(sourceImagesRaw)
 	if item.Filename == "" {
 		item.Filename = FilenameFromImageURL(item.ImageURL)
 	}
@@ -1434,6 +1473,7 @@ func normalizeAsset(asset Asset) (Asset, error) {
 	asset.SourceAccountID = strings.TrimSpace(asset.SourceAccountID)
 	asset.Category = strings.TrimSpace(asset.Category)
 	asset.Tags = normalizeTags(asset.Tags)
+	asset.SourceImages = normalizeAssetSourceImages(asset.SourceImages)
 	asset.Note = strings.TrimSpace(asset.Note)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if strings.TrimSpace(asset.CreatedAt) == "" {
@@ -1441,6 +1481,134 @@ func normalizeAsset(asset Asset) (Asset, error) {
 	}
 	asset.UpdatedAt = now
 	return asset, nil
+}
+
+func normalizeAssetSourceImages(values []AssetSourceImage) []AssetSourceImage {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]AssetSourceImage, 0, len(values))
+	for _, value := range values {
+		normalized := AssetSourceImage{
+			ID:       cleanID(value.ID),
+			Role:     strings.TrimSpace(value.Role),
+			Name:     strings.TrimSpace(value.Name),
+			URL:      strings.TrimSpace(value.URL),
+			Category: strings.TrimSpace(value.Category),
+			Tags:     normalizeTags(value.Tags),
+			Origin:   normalizeAssetSourceOrigin(firstNonNilAssetOrigin(value.Origin, value.Source), value.URL),
+		}
+		if normalized.Origin != nil {
+			normalized.Source = normalized.Origin
+		}
+		if normalized.ID == "" && normalized.Role == "" && normalized.Name == "" && normalized.URL == "" && normalized.Category == "" && len(normalized.Tags) == 0 && normalized.Origin == nil {
+			continue
+		}
+		result = append(result, normalized)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func firstNonNilAssetOrigin(values ...*AssetSourceOrigin) *AssetSourceOrigin {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func normalizeAssetSourceOrigin(origin *AssetSourceOrigin, fallbackURL string) *AssetSourceOrigin {
+	if origin == nil {
+		if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+			return &AssetSourceOrigin{
+				Type:      "url",
+				Confirmed: true,
+				URL:       trimmed,
+			}
+		}
+		return nil
+	}
+	copy := *origin
+	copy.Type = strings.TrimSpace(copy.Type)
+	copy.URL = strings.TrimSpace(copy.URL)
+	copy.FilePath = strings.TrimSpace(copy.FilePath)
+	if copy.Gallery != nil {
+		gallery := *copy.Gallery
+		gallery.AssetID = cleanID(gallery.AssetID)
+		gallery.ConversationID = cleanID(gallery.ConversationID)
+		gallery.TurnID = cleanID(gallery.TurnID)
+		gallery.ImageID = cleanID(gallery.ImageID)
+		if gallery.AssetID == "" && gallery.ConversationID == "" && gallery.TurnID == "" && gallery.ImageID == "" && gallery.Index == nil {
+			copy.Gallery = nil
+		} else {
+			copy.Gallery = &gallery
+		}
+	}
+	if copy.Type == "" {
+		switch {
+		case copy.Gallery != nil:
+			copy.Type = "gallery"
+		case copy.FilePath != "":
+			copy.Type = "file"
+		case copy.URL != "":
+			copy.Type = "url"
+		case strings.TrimSpace(fallbackURL) != "":
+			copy.Type = "url"
+			copy.URL = strings.TrimSpace(fallbackURL)
+			copy.Confirmed = true
+		}
+	}
+	switch copy.Type {
+	case "gallery":
+		if copy.Gallery == nil {
+			return nil
+		}
+	case "file":
+		if copy.FilePath == "" {
+			return nil
+		}
+	case "url":
+		if copy.URL == "" {
+			if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+				copy.URL = trimmed
+				copy.Confirmed = true
+			} else {
+				return nil
+			}
+		}
+	default:
+		if copy.Gallery == nil && copy.FilePath == "" && copy.URL == "" {
+			return nil
+		}
+	}
+	return &copy
+}
+
+func mustMarshalSourceImages(values []AssetSourceImage) string {
+	if len(values) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(payload)
+}
+
+func unmarshalSourceImages(raw string) []AssetSourceImage {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	var items []AssetSourceImage
+	if err := json.Unmarshal([]byte(trimmed), &items); err != nil {
+		return nil
+	}
+	return normalizeAssetSourceImages(items)
 }
 
 func normalizeTags(values []string) []string {

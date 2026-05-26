@@ -19,33 +19,34 @@ import (
 )
 
 type imageAssetView struct {
-	ID              string   `json:"id"`
-	Title           string   `json:"title"`
-	Prompt          string   `json:"prompt"`
-	RevisedPrompt   string   `json:"revisedPrompt,omitempty"`
-	Mode            string   `json:"mode"`
-	Model           string   `json:"model"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt,omitempty"`
-	ConversationID  string   `json:"conversationId,omitempty"`
-	TurnID          string   `json:"turnId,omitempty"`
-	ImageID         string   `json:"imageId,omitempty"`
-	Status          string   `json:"status,omitempty"`
-	ImageURL        string   `json:"imageUrl,omitempty"`
-	Filename        string   `json:"filename,omitempty"`
-	MIMEType        string   `json:"mimeType,omitempty"`
-	SizeBytes       int64    `json:"sizeBytes,omitempty"`
-	SHA256          string   `json:"sha256,omitempty"`
-	StorageKind     string   `json:"storageKind,omitempty"`
-	SourceKind      string   `json:"sourceKind,omitempty"`
-	OriginalURL     string   `json:"originalUrl,omitempty"`
-	FileID          string   `json:"fileId,omitempty"`
-	GenID           string   `json:"genId,omitempty"`
-	SourceAccountID string   `json:"sourceAccountId,omitempty"`
-	Category        string   `json:"category,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	Favorite        bool     `json:"favorite,omitempty"`
+	ID              string                         `json:"id"`
+	Title           string                         `json:"title"`
+	Prompt          string                         `json:"prompt"`
+	RevisedPrompt   string                         `json:"revisedPrompt,omitempty"`
+	Mode            string                         `json:"mode"`
+	Model           string                         `json:"model"`
+	CreatedAt       string                         `json:"createdAt"`
+	UpdatedAt       string                         `json:"updatedAt,omitempty"`
+	ConversationID  string                         `json:"conversationId,omitempty"`
+	TurnID          string                         `json:"turnId,omitempty"`
+	ImageID         string                         `json:"imageId,omitempty"`
+	Status          string                         `json:"status,omitempty"`
+	ImageURL        string                         `json:"imageUrl,omitempty"`
+	Filename        string                         `json:"filename,omitempty"`
+	MIMEType        string                         `json:"mimeType,omitempty"`
+	SizeBytes       int64                          `json:"sizeBytes,omitempty"`
+	SHA256          string                         `json:"sha256,omitempty"`
+	StorageKind     string                         `json:"storageKind,omitempty"`
+	SourceKind      string                         `json:"sourceKind,omitempty"`
+	OriginalURL     string                         `json:"originalUrl,omitempty"`
+	FileID          string                         `json:"fileId,omitempty"`
+	GenID           string                         `json:"genId,omitempty"`
+	SourceAccountID string                         `json:"sourceAccountId,omitempty"`
+	Category        string                         `json:"category,omitempty"`
+	Tags            []string                       `json:"tags,omitempty"`
+	SourceImages    []imageassets.AssetSourceImage `json:"sourceImages,omitempty"`
+	Note            string                         `json:"note,omitempty"`
+	Favorite        bool                           `json:"favorite,omitempty"`
 }
 
 type imageAssetTagStatView struct {
@@ -137,6 +138,31 @@ func (s *Server) handleListImageAssets(w http.ResponseWriter, r *http.Request) {
 		"nextOffset": result.NextOffset,
 		"sort":       sort,
 	})
+}
+
+func (s *Server) handleGetImageAsset(w http.ResponseWriter, r *http.Request) {
+	store, err := imageassets.NewStore(s.cfg.RootDir())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	defer store.Close()
+
+	if err := s.syncImageAssetsFromHistory(r, store); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	item, err := store.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if item == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "asset not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"item": buildImageAssetView(*item)})
 }
 
 func (s *Server) handleUpdateImageAsset(w http.ResponseWriter, r *http.Request) {
@@ -768,6 +794,8 @@ func (s *Server) extractImageAssetsFromConversation(conversation imagehistory.Co
 			Prompt:    conversation.Prompt,
 			Model:     conversation.Model,
 			Count:     conversation.Count,
+			Category:  conversation.Category,
+			Tags:      append([]string(nil), conversation.Tags...),
 			Images:    conversation.Images,
 			CreatedAt: conversation.CreatedAt,
 			Status:    conversation.Status,
@@ -803,6 +831,9 @@ func (s *Server) extractImageAssetsFromConversation(conversation imagehistory.Co
 				FileID:          strings.TrimSpace(image.FileID),
 				GenID:           strings.TrimSpace(image.GenID),
 				SourceAccountID: strings.TrimSpace(image.SourceAccountID),
+				Category:        strings.TrimSpace(turn.Category),
+				Tags:            append([]string(nil), turn.Tags...),
+				SourceImages:    buildAssetSourceImagesFromHistory(turn.SourceImages),
 			}
 			asset = s.enrichImageAssetFileMetadata(asset)
 			items = append(items, asset)
@@ -867,6 +898,74 @@ func summarizePrompt(prompt string) string {
 	return string(runes[:32]) + "..."
 }
 
+func buildAssetSourceImagesFromHistory(items []imagehistory.SourceImage) []imageassets.AssetSourceImage {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]imageassets.AssetSourceImage, 0, len(items))
+	for _, item := range items {
+		origin := buildAssetSourceOriginFromHistory(item.Source, item.URL)
+		reference := imageassets.AssetSourceImage{
+			ID:       cleanImageAssetID(item.ID),
+			Role:     strings.TrimSpace(item.Role),
+			Name:     strings.TrimSpace(item.Name),
+			URL:      normalizeImageAssetURL(item.URL),
+			Category: strings.TrimSpace(item.Category),
+			Tags:     append([]string(nil), item.Tags...),
+			Origin:   origin,
+			Source:   origin,
+		}
+		if reference.ID == "" && reference.Role == "" && reference.Name == "" && reference.URL == "" && reference.Category == "" && len(reference.Tags) == 0 && reference.Origin == nil {
+			continue
+		}
+		result = append(result, reference)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func buildAssetSourceOriginFromHistory(origin *imagehistory.ImageSourceOrigin, fallbackURL string) *imageassets.AssetSourceOrigin {
+	if origin == nil {
+		if trimmed := normalizeImageAssetURL(fallbackURL); trimmed != "" {
+			return &imageassets.AssetSourceOrigin{
+				Type:      "url",
+				Confirmed: true,
+				URL:       trimmed,
+			}
+		}
+		return nil
+	}
+	copy := &imageassets.AssetSourceOrigin{
+		Type:      strings.TrimSpace(origin.Type),
+		Confirmed: origin.Confirmed,
+		URL:       strings.TrimSpace(origin.URL),
+		FilePath:  strings.TrimSpace(origin.FilePath),
+	}
+	if origin.Gallery != nil {
+		copy.Gallery = &imageassets.AssetSourceGalleryReference{
+			AssetID:        cleanImageAssetID(origin.Gallery.AssetID),
+			Index:          origin.Gallery.Index,
+			ConversationID: cleanImageAssetID(origin.Gallery.ConversationID),
+			TurnID:         cleanImageAssetID(origin.Gallery.TurnID),
+			ImageID:        cleanImageAssetID(origin.Gallery.ImageID),
+		}
+	}
+	copy.URL = normalizeImageAssetURL(copy.URL)
+	if copy.Type == "" {
+		switch {
+		case copy.Gallery != nil:
+			copy.Type = "gallery"
+		case copy.FilePath != "":
+			copy.Type = "file"
+		case copy.URL != "":
+			copy.Type = "url"
+		}
+	}
+	return copy
+}
+
 func buildImageAssetView(item imageassets.Asset) imageAssetView {
 	return imageAssetView{
 		ID:              item.ID,
@@ -894,6 +993,7 @@ func buildImageAssetView(item imageassets.Asset) imageAssetView {
 		SourceAccountID: item.SourceAccountID,
 		Category:        item.Category,
 		Tags:            append([]string(nil), item.Tags...),
+		SourceImages:    append([]imageassets.AssetSourceImage(nil), item.SourceImages...),
 		Note:            item.Note,
 		Favorite:        item.Favorite,
 	}

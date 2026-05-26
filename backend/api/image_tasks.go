@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"chatgpt2api/internal/accounts"
@@ -32,11 +33,14 @@ const (
 )
 
 type imageTaskSourceImagePayload struct {
-	ID      string `json:"id"`
-	Role    string `json:"role"`
-	Name    string `json:"name"`
-	DataURL string `json:"dataUrl,omitempty"`
-	URL     string `json:"url,omitempty"`
+	ID       string                                        `json:"id"`
+	Role     string                                        `json:"role"`
+	Name     string                                        `json:"name"`
+	DataURL  string                                        `json:"dataUrl,omitempty"`
+	URL      string                                        `json:"url,omitempty"`
+	Category string                                        `json:"category,omitempty"`
+	Tags     []string                                      `json:"tags,omitempty"`
+	Source   *imagehistory.ImageSourceOrigin               `json:"source,omitempty"`
 }
 
 type imageTaskSourceReferencePayload struct {
@@ -48,23 +52,25 @@ type imageTaskSourceReferencePayload struct {
 }
 
 type createImageTaskRequest struct {
-	TaskID          string                              `json:"taskId,omitempty"`
-	ConversationID  string                              `json:"conversationId"`
-	TurnID          string                              `json:"turnId"`
-	Source          string                              `json:"source,omitempty"`
-	Mode            string                              `json:"mode"`
-	Prompt          string                              `json:"prompt"`
-	Model           string                              `json:"model"`
-	Count           int                                 `json:"count"`
-	Size            string                              `json:"size,omitempty"`
+	TaskID           string                              `json:"taskId,omitempty"`
+	ConversationID   string                              `json:"conversationId"`
+	TurnID           string                              `json:"turnId"`
+	Source           string                              `json:"source,omitempty"`
+	Mode             string                              `json:"mode"`
+	Prompt           string                              `json:"prompt"`
+	Model            string                              `json:"model"`
+	Count            int                                 `json:"count"`
+	Size             string                              `json:"size,omitempty"`
 	ResolutionAccess string                             `json:"resolutionAccess,omitempty"`
-	Quality         string                              `json:"quality,omitempty"`
-	Background      string                              `json:"background,omitempty"`
-	ResponseFormat  string                              `json:"responseFormat,omitempty"`
-	RetryImageIndex *int                                `json:"retryImageIndex,omitempty"`
-	SourceImages    []imageTaskSourceImagePayload       `json:"sourceImages,omitempty"`
-	SourceReference *imageTaskSourceReferencePayload    `json:"sourceReference,omitempty"`
-	Policy          *accounts.ImageAccountRoutingPolicy `json:"policy,omitempty"`
+	Quality          string                              `json:"quality,omitempty"`
+	Background       string                              `json:"background,omitempty"`
+	ResponseFormat   string                              `json:"responseFormat,omitempty"`
+	RetryImageIndex  *int                                `json:"retryImageIndex,omitempty"`
+	Category         string                              `json:"category,omitempty"`
+	Tags             []string                            `json:"tags,omitempty"`
+	SourceImages     []imageTaskSourceImagePayload       `json:"sourceImages,omitempty"`
+	SourceReference  *imageTaskSourceReferencePayload    `json:"sourceReference,omitempty"`
+	Policy           *accounts.ImageAccountRoutingPolicy `json:"policy,omitempty"`
 }
 
 type imageTaskBlocker struct {
@@ -89,6 +95,10 @@ type imageTaskView struct {
 	ConversationID  string                 `json:"conversationId"`
 	TurnID          string                 `json:"turnId"`
 	Mode            string                 `json:"mode"`
+	Category        string                 `json:"category,omitempty"`
+	Tags            []string               `json:"tags,omitempty"`
+	SourceImages    []imageTaskSourceImagePayload `json:"sourceImages,omitempty"`
+	SourceReference *imageTaskSourceReferencePayload `json:"sourceReference,omitempty"`
 	Status          imageTaskStatus        `json:"status"`
 	CreatedAt       string                 `json:"createdAt"`
 	StartedAt       string                 `json:"startedAt,omitempty"`
@@ -127,11 +137,14 @@ type imageTaskRequirement struct {
 }
 
 type imageTaskSourceImage struct {
-	ID      string
-	Role    string
-	Name    string
-	DataURL string
-	URL     string
+	ID       string
+	Role     string
+	Name     string
+	DataURL  string
+	URL      string
+	Category string
+	Tags     []string
+	Source   *imagehistory.ImageSourceOrigin
 }
 
 type imageTaskSourceReference struct {
@@ -167,6 +180,8 @@ type imageTask struct {
 	Quality         string
 	Background      string
 	ResponseFormat  string
+	Category        string
+	Tags            []string
 	SourceImages    []imageTaskSourceImage
 	SourceReference *imageTaskSourceReference
 	Requirement     imageTaskRequirement
@@ -181,4 +196,94 @@ type imageTask struct {
 	Units           []imageTaskUnit
 	ActiveUnits     int
 	CancelRequested bool
+}
+
+func normalizeImageTaskTags(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func normalizeImageTaskSourceOrigin(origin *imagehistory.ImageSourceOrigin, fallbackURL string) *imagehistory.ImageSourceOrigin {
+	if origin == nil {
+		if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+			return &imagehistory.ImageSourceOrigin{
+				Type:      "url",
+				Confirmed: true,
+				URL:       trimmed,
+			}
+		}
+		return nil
+	}
+	copy := *origin
+	copy.Type = strings.TrimSpace(copy.Type)
+	copy.URL = strings.TrimSpace(copy.URL)
+	copy.FilePath = strings.TrimSpace(copy.FilePath)
+	if copy.Gallery != nil {
+		gallery := *copy.Gallery
+		gallery.AssetID = strings.TrimSpace(gallery.AssetID)
+		gallery.ConversationID = strings.TrimSpace(gallery.ConversationID)
+		gallery.TurnID = strings.TrimSpace(gallery.TurnID)
+		gallery.ImageID = strings.TrimSpace(gallery.ImageID)
+		if gallery.AssetID == "" && gallery.ConversationID == "" && gallery.TurnID == "" && gallery.ImageID == "" && gallery.Index == nil {
+			copy.Gallery = nil
+		} else {
+			copy.Gallery = &gallery
+		}
+	}
+	if copy.Type == "" {
+		switch {
+		case copy.Gallery != nil:
+			copy.Type = "gallery"
+		case copy.FilePath != "":
+			copy.Type = "file"
+		case copy.URL != "":
+			copy.Type = "url"
+		case strings.TrimSpace(fallbackURL) != "":
+			copy.Type = "url"
+			copy.URL = strings.TrimSpace(fallbackURL)
+			copy.Confirmed = true
+		}
+	}
+	switch copy.Type {
+	case "gallery":
+		if copy.Gallery == nil {
+			return nil
+		}
+	case "file":
+		if copy.FilePath == "" {
+			return nil
+		}
+	case "url":
+		if copy.URL == "" {
+			if trimmed := strings.TrimSpace(fallbackURL); trimmed != "" {
+				copy.URL = trimmed
+				copy.Confirmed = true
+			} else {
+				return nil
+			}
+		}
+	default:
+		if copy.Gallery == nil && copy.FilePath == "" && copy.URL == "" {
+			return nil
+		}
+	}
+	return &copy
 }

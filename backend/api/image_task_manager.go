@@ -639,6 +639,7 @@ func (m *imageTaskManager) copyTask(taskID string) *imageTask {
 	copy.Images = append([]imagehistory.Image(nil), task.Images...)
 	copy.Units = append([]imageTaskUnit(nil), task.Units...)
 	copy.SourceImages = append([]imageTaskSourceImage(nil), task.SourceImages...)
+	copy.Tags = append([]string(nil), task.Tags...)
 	copy.Blockers = append([]imageTaskBlocker(nil), task.Blockers...)
 	return &copy
 }
@@ -784,11 +785,14 @@ func (m *imageTaskManager) newTask(req createImageTaskRequest) (*imageTask, erro
 	sourceImages := make([]imageTaskSourceImage, 0, len(req.SourceImages))
 	for index, source := range req.SourceImages {
 		sourceImages = append(sourceImages, imageTaskSourceImage{
-			ID:      firstNonEmpty(strings.TrimSpace(source.ID), fmt.Sprintf("%s-source-%d", id, index)),
-			Role:    firstNonEmpty(strings.TrimSpace(source.Role), "image"),
-			Name:    firstNonEmpty(strings.TrimSpace(source.Name), fmt.Sprintf("source-%d.png", index+1)),
-			DataURL: strings.TrimSpace(source.DataURL),
-			URL:     strings.TrimSpace(source.URL),
+			ID:       firstNonEmpty(strings.TrimSpace(source.ID), fmt.Sprintf("%s-source-%d", id, index)),
+			Role:     firstNonEmpty(strings.TrimSpace(source.Role), "image"),
+			Name:     firstNonEmpty(strings.TrimSpace(source.Name), fmt.Sprintf("source-%d.png", index+1)),
+			DataURL:  strings.TrimSpace(source.DataURL),
+			URL:      strings.TrimSpace(source.URL),
+			Category: strings.TrimSpace(source.Category),
+			Tags:     normalizeImageTaskTags(source.Tags),
+			Source:   normalizeImageTaskSourceOrigin(source.Source, strings.TrimSpace(source.URL)),
 		})
 	}
 
@@ -846,6 +850,8 @@ func (m *imageTaskManager) newTask(req createImageTaskRequest) (*imageTask, erro
 		Quality:         strings.TrimSpace(req.Quality),
 		Background:      strings.TrimSpace(req.Background),
 		ResponseFormat:  firstNonEmpty(strings.TrimSpace(req.ResponseFormat), "url"),
+		Category:        strings.TrimSpace(req.Category),
+		Tags:            normalizeImageTaskTags(req.Tags),
 		SourceImages:    sourceImages,
 		SourceReference: sourceReference,
 		Requirement:     requirement,
@@ -1054,6 +1060,8 @@ func (m *imageTaskManager) buildTaskViewLocked(task *imageTask) *imageTaskView {
 		ConversationID:  task.ConversationID,
 		TurnID:          task.TurnID,
 		Mode:            task.Mode,
+		Category:        task.Category,
+		Tags:            append([]string(nil), task.Tags...),
 		Status:          task.Status,
 		CreatedAt:       task.CreatedAt.Format(time.RFC3339Nano),
 		Count:           task.Count,
@@ -1064,6 +1072,30 @@ func (m *imageTaskManager) buildTaskViewLocked(task *imageTask) *imageTaskView {
 		Images:          append([]imagehistory.Image(nil), task.Images...),
 		Error:           task.Error,
 		CancelRequested: task.CancelRequested,
+	}
+	if len(task.SourceImages) > 0 {
+		view.SourceImages = make([]imageTaskSourceImagePayload, 0, len(task.SourceImages))
+		for _, source := range task.SourceImages {
+			view.SourceImages = append(view.SourceImages, imageTaskSourceImagePayload{
+				ID:       source.ID,
+				Role:     source.Role,
+				Name:     source.Name,
+				DataURL:  source.DataURL,
+				URL:      source.URL,
+				Category: source.Category,
+				Tags:     append([]string(nil), source.Tags...),
+				Source:   source.Source,
+			})
+		}
+	}
+	if task.SourceReference != nil {
+		view.SourceReference = &imageTaskSourceReferencePayload{
+			OriginalFileID:  task.SourceReference.OriginalFileID,
+			OriginalGenID:   task.SourceReference.OriginalGenID,
+			ConversationID:  task.SourceReference.ConversationID,
+			ParentMessageID: task.SourceReference.ParentMessageID,
+			SourceAccountID: task.SourceReference.SourceAccountID,
+		}
 	}
 	if !task.StartedAt.IsZero() {
 		view.StartedAt = task.StartedAt.Format(time.RFC3339Nano)

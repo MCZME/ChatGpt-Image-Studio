@@ -368,6 +368,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/image/conversations/{id}", s.requireUIAuth(http.HandlerFunc(s.handleDeleteImageConversation)))
 	mux.Handle("GET /api/image/assets", s.requireUIAuth(http.HandlerFunc(s.handleListImageAssets)))
 	mux.Handle("GET /api/image/assets/stats", s.requireUIAuth(http.HandlerFunc(s.handleImageAssetStats)))
+	mux.Handle("GET /api/image/assets/{id}", s.requireUIAuth(http.HandlerFunc(s.handleGetImageAsset)))
 	mux.Handle("DELETE /api/image/assets", s.requireUIAuth(http.HandlerFunc(s.handleBulkDeleteImageAssets)))
 	mux.Handle("PUT /api/image/assets/{id}", s.requireUIAuth(http.HandlerFunc(s.handleUpdateImageAsset)))
 	mux.Handle("DELETE /api/image/assets/{id}", s.requireUIAuth(http.HandlerFunc(s.handleDeleteImageAsset)))

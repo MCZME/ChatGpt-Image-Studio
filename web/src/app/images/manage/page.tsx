@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { LoaderCircle, PencilLine, ScanSearch, Tags, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { LoaderCircle, PencilLine, ScanSearch, Tags, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   type ImageAssetCategoryStat,
   type ImageAssetTagStat,
 } from "@/lib/api";
+import { importUnifiedImageAssets } from "@/store/image-assets";
 
 type RenameState = {
   kind: "tag" | "category";
@@ -36,13 +37,40 @@ type CleanupOptions = {
   removeMissingFileAssets: boolean;
 };
 
+function splitTagsInput(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\n，]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function countImportErrors(
+  result: Awaited<ReturnType<typeof importUnifiedImageAssets>>,
+) {
+  const failed =
+    Array.isArray(result.failed)
+      ? result.failed.length
+      : result.errors?.length ?? 0;
+  const imported = result.imported ?? result.succeeded ?? 0;
+  const skipped = result.skipped ?? result.duplicates ?? 0;
+  return { failed, imported, skipped };
+}
+
 export default function ImageLibraryManagePage() {
   const [tags, setTags] = useState<ImageAssetTagStat[]>([]);
   const [categories, setCategories] = useState<ImageAssetCategoryStat[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isImporting, setIsImporting] = useState(false);
   const [savingKey, setSavingKey] = useState("");
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [mergeConfirmState, setMergeConfirmState] = useState<MergeConfirmState | null>(null);
+  const [importCategory, setImportCategory] = useState("");
+  const [importTags, setImportTags] = useState("");
+  const [importNote, setImportNote] = useState("");
   const [cleanupOptions, setCleanupOptions] = useState<CleanupOptions>({
     removeOrphanFiles: true,
     removeMissingFileAssets: true,
@@ -51,6 +79,7 @@ export default function ImageLibraryManagePage() {
     useState<ImageAssetCleanupResponse | null>(null);
   const [isScanningCleanup, setIsScanningCleanup] = useState(false);
   const [isRunningCleanup, setIsRunningCleanup] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -138,6 +167,48 @@ export default function ImageLibraryManagePage() {
     }
   };
 
+  const handlePickImportFiles = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleImportFiles = async (files: FileList | null) => {
+    const normalizedFiles = files ? Array.from(files) : [];
+    if (normalizedFiles.length === 0) {
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const data = await importUnifiedImageAssets(normalizedFiles, {
+        category: importCategory,
+        tags: splitTagsInput(importTags),
+        note: importNote,
+      });
+      const summary = countImportErrors(data);
+      setImportCategory("");
+      setImportTags("");
+      setImportNote("");
+      await refresh();
+      if (summary.failed > 0) {
+        toast.error(
+          `已导入 ${summary.imported} 张，失败 ${summary.failed} 张${summary.skipped > 0 ? `，跳过 ${summary.skipped} 张` : ""}`,
+        );
+      } else if (summary.skipped > 0) {
+        toast.success(
+          `已导入 ${summary.imported} 张，跳过 ${summary.skipped} 张重复图片`,
+        );
+      } else {
+        toast.success(`已导入 ${summary.imported} 张图片`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导入图片失败");
+    } finally {
+      setIsImporting(false);
+      if (importInputRef.current) {
+        importInputRef.current.value = "";
+      }
+    }
+  };
+
   const runCleanup = async (dryRun: boolean) => {
     const hasTarget =
       cleanupOptions.removeOrphanFiles || cleanupOptions.removeMissingFileAssets;
@@ -200,6 +271,54 @@ export default function ImageLibraryManagePage() {
           </div>
         ) : (
           <div className="grid gap-5 pt-5 xl:grid-cols-2">
+            <section className="rounded-[26px] border border-stone-200/80 bg-white/80 p-4 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)] xl:col-span-2">
+              <div className="flex items-center gap-2 text-sm font-medium text-stone-800 dark:text-[var(--studio-text-strong)]">
+                <Upload className="size-4 text-stone-500" />
+                导入图片
+              </div>
+              <div className="mt-4 grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)_minmax(0,1.2fr)_auto]">
+                <Input
+                  value={importCategory}
+                  onChange={(event) => setImportCategory(event.target.value)}
+                  placeholder="导入分类（可选）"
+                  className="h-11 rounded-2xl border-stone-200 bg-stone-50 shadow-none"
+                />
+                <Input
+                  value={importTags}
+                  onChange={(event) => setImportTags(event.target.value)}
+                  placeholder="导入标签，多个用逗号分隔（可选）"
+                  className="h-11 rounded-2xl border-stone-200 bg-stone-50 shadow-none"
+                />
+                <Input
+                  value={importNote}
+                  onChange={(event) => setImportNote(event.target.value)}
+                  placeholder="导入备注（可选）"
+                  className="h-11 rounded-2xl border-stone-200 bg-stone-50 shadow-none"
+                />
+                <Button
+                  type="button"
+                  className="h-11 rounded-full bg-stone-950 text-white hover:bg-stone-800"
+                  onClick={handlePickImportFiles}
+                  disabled={isImporting}
+                >
+                  {isImporting ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Upload className="size-4" />
+                  )}
+                  选择图片
+                </Button>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => void handleImportFiles(event.target.files)}
+                />
+              </div>
+            </section>
+
             <section className="rounded-[26px] border border-stone-200/80 bg-white/80 p-4 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)]">
               <div className="flex items-center gap-2 text-sm font-medium text-stone-800 dark:text-[var(--studio-text-strong)]">
                 <Tags className="size-4 text-stone-500" />

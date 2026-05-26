@@ -4,6 +4,7 @@ import localforage from "localforage";
 
 import {
   fetchConfig,
+  type ImageSourceOrigin,
   type ImageModel,
   type ImageQuality,
   type ImageResolutionAccess,
@@ -20,6 +21,7 @@ export type StoredSourceImage = {
   name: string;
   dataUrl?: string;
   url?: string;
+  origin?: ImageSourceOrigin;
 };
 
 export type StoredImage = {
@@ -49,6 +51,8 @@ export type ImageConversationTurn = {
   title: string;
   mode: ImageMode;
   prompt: string;
+  category?: string;
+  tags?: string[];
   model: ImageModel;
   count: number;
   size?: string;
@@ -76,6 +80,8 @@ export type ImageConversation = {
   title: string;
   mode: ImageMode;
   prompt: string;
+  category?: string;
+  tags?: string[];
   model: ImageModel;
   count: number;
   size?: string;
@@ -323,10 +329,24 @@ function normalizeImageMode(value: unknown): ImageMode {
   return value === "edit" || value === "upscale" ? "edit" : "generate";
 }
 
+function normalizeText(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function normalizeTurn(turn: ImageConversationTurn): ImageConversationTurn {
   return {
     ...turn,
     mode: normalizeImageMode(turn.mode),
+    category: normalizeText(turn.category) || undefined,
+    tags: Array.isArray(turn.tags)
+      ? Array.from(
+          new Set(
+            turn.tags
+              .map((item) => normalizeText(item))
+              .filter(Boolean),
+          ),
+        )
+      : [],
     resolutionAccess: normalizeResolutionAccess(turn.resolutionAccess),
     quality: normalizeImageQuality(turn.quality),
     sourceImages: Array.isArray(turn.sourceImages) ? turn.sourceImages : [],
@@ -379,6 +399,8 @@ export function normalizeConversation(
             title: conversation.title,
             mode: normalizeImageMode(conversation.mode),
             prompt: conversation.prompt,
+            category: conversation.category,
+            tags: conversation.tags,
             model: conversation.model,
             count: conversation.count,
             size: conversation.size,
@@ -399,6 +421,8 @@ export function normalizeConversation(
     title: latestTurn.title,
     mode: latestTurn.mode,
     prompt: latestTurn.prompt,
+    category: latestTurn.category,
+    tags: latestTurn.tags,
     model: latestTurn.model,
     count: latestTurn.count,
     size: latestTurn.size,

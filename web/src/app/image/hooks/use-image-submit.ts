@@ -28,6 +28,9 @@ import { buildSourceImageUrl } from "../view-utils";
 type UseImageSubmitOptions = {
   mode: ImageMode;
   imagePrompt: string;
+  imageTitle: string;
+  imageCategory: string;
+  imageTags: string[];
   imageModel: ImageModel;
   imageSources: StoredSourceImage[];
   maskSource: StoredSourceImage | null;
@@ -67,6 +70,8 @@ function buildConversationBase(
     resolutionAccess: draftTurn.resolutionAccess,
     quality: draftTurn.quality,
     scale: draftTurn.scale,
+    category: draftTurn.category,
+    tags: draftTurn.tags,
     sourceImages: draftTurn.sourceImages,
     images: draftTurn.images,
     createdAt: draftTurn.createdAt,
@@ -109,6 +114,9 @@ function normalizeImageQuality(value: string | undefined, fallback: ImageQuality
 export function useImageSubmit({
   mode,
   imagePrompt,
+  imageTitle,
+  imageCategory,
+  imageTags,
   imageModel,
   imageSources,
   maskSource,
@@ -169,9 +177,11 @@ export function useImageSubmit({
       const now = new Date().toISOString();
       const draftTurn = createConversationTurn({
         turnId,
-        title: buildConversationTitle("edit", prompt),
+        title: buildConversationTitle("edit", prompt, "", imageTitle),
         mode: "edit",
         prompt,
+        category: imageCategory,
+        tags: imageTags,
         model: imageModel,
         count: 1,
         size: supportsEditableOutputOptions ? imageSize : undefined,
@@ -227,6 +237,8 @@ export function useImageSubmit({
           turnId,
           mode: "edit",
           prompt,
+          category: imageCategory,
+          tags: imageTags,
           model: imageModel,
           count: 1,
           size: supportsEditableOutputOptions ? imageSize : undefined,
@@ -282,10 +294,13 @@ export function useImageSubmit({
       closeSelectionEditor,
       editorTarget,
       focusConversation,
+      imageTitle,
+      imageCategory,
       imageModel,
       imageQuality,
       imageResolutionAccess,
       imageSize,
+      imageTags,
       makeId,
       persistConversation,
       selectedConversationId,
@@ -347,9 +362,11 @@ export function useImageSubmit({
         : createLoadingImages(requestCount, turn.id);
       const draftTurn = createConversationTurn({
         turnId: turn.id,
-        title: buildConversationTitle(turnMode, prompt),
+        title: buildConversationTitle(turnMode, prompt, "", turn.title),
         mode: turnMode,
         prompt,
+        category: turn.category,
+        tags: turn.tags,
         model: turn.model,
         count: displayCount,
         size: turn.size,
@@ -380,6 +397,8 @@ export function useImageSubmit({
           turnId: turn.id,
           mode: turnMode,
           prompt,
+          category: turn.category,
+          tags: turn.tags,
           model: turn.model,
           count: requestCount,
           retryImageIndex: isSingleImageRetry ? imageIndex : undefined,
@@ -454,11 +473,11 @@ export function useImageSubmit({
     [focusConversation, makeId, setSubmitElapsedSeconds, updateConversation],
   );
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(async (promptOverride?: string) => {
     if (isSubmitDispatchingRef.current) {
       return;
     }
-    const prompt = imagePrompt.trim();
+    const prompt = (promptOverride ?? imagePrompt).trim();
     if (mode === "generate" && !prompt) {
       toast.error("请输入提示词");
       return;
@@ -479,9 +498,11 @@ export function useImageSubmit({
       mode === "generate" ? parsedCount : 1;
     const draftTurn = createConversationTurn({
       turnId,
-      title: buildConversationTitle(mode, prompt),
+      title: buildConversationTitle(mode, prompt, "", imageTitle),
       mode,
       prompt,
+      category: imageCategory,
+      tags: imageTags,
       model: imageModel,
       count: expectedCount,
       size: imageSize,
@@ -515,6 +536,8 @@ export function useImageSubmit({
         turnId,
         mode,
         prompt,
+        category: imageCategory,
+        tags: imageTags,
         model: imageModel,
         count: expectedCount,
         size: imageSize,
@@ -567,6 +590,9 @@ export function useImageSubmit({
     focusConversation,
     imageModel,
     imagePrompt,
+    imageTitle,
+    imageCategory,
+    imageTags,
     imageSources,
     makeId,
     mode,

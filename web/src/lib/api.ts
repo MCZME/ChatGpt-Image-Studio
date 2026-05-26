@@ -53,11 +53,50 @@ export type ImageTaskBlocker = {
   detail?: string;
 };
 
+export type ImageSourceOrigin = {
+  type?: "gallery" | "file" | "url" | string;
+  confirmed?: boolean;
+  url?: string;
+  filePath?: string;
+  gallery?: {
+    assetId?: string;
+    index?: number;
+    conversationId?: string;
+    turnId?: string;
+    imageId?: string;
+  };
+};
+
+export type ImageAssetSourceImage = {
+  id?: string;
+  role?: "image" | "mask" | string;
+  name?: string;
+  url?: string;
+  category?: string;
+  tags?: string[];
+  origin?: ImageSourceOrigin;
+  source?: ImageSourceOrigin;
+};
+
+export type ImageTaskSourceImage = {
+  id: string;
+  role: "image" | "mask" | string;
+  name: string;
+  dataUrl?: string;
+  url?: string;
+  category?: string;
+  tags?: string[];
+  source?: ImageSourceOrigin;
+  origin?: ImageSourceOrigin;
+};
+
 export type ImageTaskView = {
   id: string;
   conversationId: string;
   turnId: string;
   mode: "generate" | "edit" | string;
+  category?: string;
+  tags?: string[];
   status: ImageTaskStatus;
   createdAt: string;
   startedAt?: string;
@@ -67,6 +106,7 @@ export type ImageTaskView = {
   queuePosition?: number;
   waitingReason?: ImageTaskWaitingReason;
   blockers?: ImageTaskBlocker[];
+  sourceImages?: ImageTaskSourceImage[];
   images: ImageResponseItem[];
   error?: string;
   cancelRequested?: boolean;
@@ -421,6 +461,7 @@ export type ImageAsset = {
   sourceAccountId?: string;
   category?: string;
   tags?: string[];
+  sourceImages?: ImageAssetSourceImage[];
   note?: string;
   favorite?: boolean;
 };
@@ -566,11 +607,26 @@ let cachedConfig: ConfigPayload | null = null;
 export function setCachedImageAccountPolicy(
   policy: StoredImageAccountPolicy | null,
 ) {
-  cachedImageAccountPolicy = policy ? normalizeImageAccountPolicy(policy) : null;
+  cachedImageAccountPolicy = policy
+    ? normalizeImageAccountPolicy(policy)
+    : null;
 }
 
 function setCachedConfig(config: ConfigPayload | null) {
   cachedConfig = config;
+}
+
+function normalizeTaskSourceImages(
+  items: Parameters<typeof createImageTask>[0]["sourceImages"],
+) {
+  return (items ?? []).map((item) => {
+    const source = item.source ?? item.origin;
+    return {
+      ...item,
+      source,
+      origin: undefined,
+    };
+  });
 }
 
 export async function fetchImageAccountPolicy() {
@@ -820,10 +876,13 @@ export async function fetchDefaultConfig() {
 }
 
 export async function updateConfig(config: ConfigPayload) {
-  const result = await httpRequest<{ status: string; config: ConfigPayload }>("/api/config", {
-    method: "PUT",
-    body: config,
-  });
+  const result = await httpRequest<{ status: string; config: ConfigPayload }>(
+    "/api/config",
+    {
+      method: "PUT",
+      body: config,
+    },
+  );
   setCachedConfig(result.config);
   return result;
 }
@@ -865,6 +924,12 @@ export async function listImageAssets(params?: {
   }
   const suffix = search.size > 0 ? `?${search.toString()}` : "";
   return httpRequest<ImageAssetListResponse>(`/api/image/assets${suffix}`);
+}
+
+export async function getImageAsset(id: string) {
+  return httpRequest<{ item: ImageAsset }>(
+    `/api/image/assets/${encodeURIComponent(id)}`,
+  );
 }
 
 export async function updateImageAsset(
@@ -1039,7 +1104,10 @@ export async function downloadDiagnosticsExport() {
         detail?: { message?: string };
       };
       message =
-        payload?.detail?.message || payload?.message || payload?.error || message;
+        payload?.detail?.message ||
+        payload?.message ||
+        payload?.error ||
+        message;
     } catch {
       // ignore json parse errors
     }
@@ -1112,6 +1180,8 @@ export async function createImageTask(payload: {
   turnId: string;
   mode: "generate" | "edit";
   prompt: string;
+  category?: string;
+  tags?: string[];
   model?: ImageModel;
   count?: number;
   retryImageIndex?: number;
@@ -1124,6 +1194,8 @@ export async function createImageTask(payload: {
     name: string;
     dataUrl?: string;
     url?: string;
+    origin?: ImageSourceOrigin;
+    source?: ImageSourceOrigin;
   }>;
   sourceReference?: InpaintSourceReference;
   policy?: StoredImageAccountPolicy;
@@ -1137,6 +1209,17 @@ export async function createImageTask(payload: {
       turnId: payload.turnId,
       mode: payload.mode,
       prompt: payload.prompt,
+      category: payload.category?.trim() || undefined,
+      tags:
+        payload.tags && payload.tags.length > 0
+          ? Array.from(
+              new Set(
+                payload.tags
+                  .map((item) => String(item || "").trim())
+                  .filter(Boolean),
+              ),
+            )
+          : undefined,
       model: payload.model ?? "gpt-image-2",
       count: Math.max(1, payload.count ?? 1),
       retryImageIndex:
@@ -1146,7 +1229,7 @@ export async function createImageTask(payload: {
       size: payload.size?.trim() || undefined,
       resolutionAccess: payload.resolutionAccess,
       quality: payload.quality,
-      sourceImages: payload.sourceImages ?? [],
+      sourceImages: normalizeTaskSourceImages(payload.sourceImages),
       sourceReference: payload.sourceReference,
       policy: normalizeImageAccountPolicy(policy),
     },
@@ -1168,7 +1251,10 @@ export async function cancelImageTask(taskId: string) {
 
 export async function consumeImageTaskStream(
   handlers: {
-    onInit: (payload: { items: ImageTaskView[]; snapshot: ImageTaskSnapshot }) => void;
+    onInit: (payload: {
+      items: ImageTaskView[];
+      snapshot: ImageTaskSnapshot;
+    }) => void;
     onEvent: (event: ImageTaskStreamEvent) => void;
   },
   signal: AbortSignal,
@@ -1201,7 +1287,12 @@ export async function consumeImageTaskStream(
     dataLines = [];
     try {
       if (eventType === "init") {
-        handlers.onInit(JSON.parse(raw) as { items: ImageTaskView[]; snapshot: ImageTaskSnapshot });
+        handlers.onInit(
+          JSON.parse(raw) as {
+            items: ImageTaskView[];
+            snapshot: ImageTaskSnapshot;
+          },
+        );
       } else {
         handlers.onEvent(JSON.parse(raw) as ImageTaskStreamEvent);
       }

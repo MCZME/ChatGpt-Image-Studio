@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   CheckSquare,
   ChevronDown,
@@ -9,18 +10,18 @@ import {
   Database,
   Heart,
   LoaderCircle,
-  Maximize2,
   Trash2,
-  Upload,
   Search,
   Square,
   Tag,
   Tags,
   TextCursorInput,
+  WandSparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppImage } from "@/components/app-image";
+import { ZoomableImage } from "@/components/zoomable-image";
 import {
   Dialog,
   DialogContent,
@@ -33,16 +34,22 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { ApiError } from "@/lib/request";
 import { cn } from "@/lib/utils";
 import { fetchImageAssetStats, type ImageAsset } from "@/lib/api";
 import {
   deleteUnifiedImageAsset,
   deleteUnifiedImageAssetsBulk,
+  getUnifiedImageAsset,
   listUnifiedImageAssets,
-  importUnifiedImageAssets,
   updateUnifiedImageAsset,
   updateUnifiedImageAssetsBulk,
 } from "@/store/image-assets";
+import {
+  buildWorkspaceForwardSearch,
+  parseWorkspaceForwardPayload,
+} from "@/app/image/workspace-forward";
+import { summarizeAssetSourceImage } from "@/store/image-asset-source-images";
 
 function normalizeImageURL(raw?: string) {
   const trimmed = String(raw || "").trim();
@@ -104,7 +111,9 @@ function formatAssetHash(value?: string | null) {
   if (!cleaned) {
     return "";
   }
-  return cleaned.length > 24 ? `${cleaned.slice(0, 12)}...${cleaned.slice(-8)}` : cleaned;
+  return cleaned.length > 24
+    ? `${cleaned.slice(0, 12)}...${cleaned.slice(-8)}`
+    : cleaned;
 }
 
 async function copyText(value: string, successMessage: string) {
@@ -132,18 +141,6 @@ function splitTagsInput(value: string) {
   );
 }
 
-function countImportErrors(
-  result: Awaited<ReturnType<typeof importUnifiedImageAssets>>,
-) {
-  const failed =
-    Array.isArray(result.failed)
-      ? result.failed.length
-      : result.errors?.length ?? 0;
-  const imported = result.imported ?? result.succeeded ?? 0;
-  const skipped = result.skipped ?? result.duplicates ?? 0;
-  return { failed, imported, skipped };
-}
-
 const IMAGE_PAGE_SIZE = 48;
 
 const SORT_OPTIONS = [
@@ -160,6 +157,16 @@ type AssetStorageDetail = {
   value: string;
   title?: string;
   url?: string;
+};
+
+type AssetSourceDetail = {
+  role: string;
+  label: string;
+  detail: string;
+  imageUrl?: string;
+  galleryAssetId?: string;
+  canOpenGalleryAsset: boolean;
+  isMissing: boolean;
 };
 
 type DeleteDialogState =
@@ -181,7 +188,40 @@ function mergeAssetsById(current: ImageAsset[], incoming: ImageAsset[]) {
   return Array.from(map.values());
 }
 
+function buildAssetSourceDetail(
+  source: NonNullable<ImageAsset["sourceImages"]>[number],
+  assetById: Map<string, ImageAsset>,
+  missingAssetIds: Set<string>,
+): AssetSourceDetail {
+  const summary = summarizeAssetSourceImage(source);
+  const origin = source.origin ?? source.source;
+  const galleryAssetId = String(origin?.gallery?.assetId || "").trim();
+  const galleryAsset = galleryAssetId ? assetById.get(galleryAssetId) : undefined;
+  const isMissing = Boolean(galleryAssetId && missingAssetIds.has(galleryAssetId));
+  const rawLabel = summary.label.trim();
+  const isImportedFileName = /^import[-:]/i.test(rawLabel);
+  return {
+    ...summary,
+    label:
+      galleryAsset?.title ||
+      (galleryAssetId && isImportedFileName ? "图库参考图" : summary.label),
+    detail: isMissing
+      ? "引用图片已删除"
+      : galleryAsset
+        ? `图库引用 · ${galleryAsset.title}`
+        : galleryAssetId
+          ? "点击打开图库资产"
+          : summary.detail,
+    imageUrl: normalizeImageURL(galleryAsset?.imageUrl || source.url),
+    galleryAssetId: galleryAssetId || undefined,
+    canOpenGalleryAsset: Boolean(galleryAssetId && !isMissing),
+    isMissing,
+  };
+}
+
 export default function ImagesPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [items, setItems] = useState<ImageAsset[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -198,14 +238,17 @@ export default function ImagesPage() {
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [bulkCategory, setBulkCategory] = useState("");
   const [bulkTags, setBulkTags] = useState("");
-  const [tagStats, setTagStats] = useState<Array<{ tag: string; count: number }>>([]);
+  const [tagStats, setTagStats] = useState<
+    Array<{ tag: string; count: number }>
+  >([]);
+  const [missingSourceAssetIds, setMissingSourceAssetIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isTitleSaving, setIsTitleSaving] = useState(false);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [isImporting, setIsImporting] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextOffset, setNextOffset] = useState(0);
   const [total, setTotal] = useState(0);
@@ -213,67 +256,75 @@ export default function ImagesPage() {
     useState<DeleteDialogState | null>(null);
   const [deleteFileToo, setDeleteFileToo] = useState(false);
   const [isPromptExpanded, setIsPromptExpanded] = useState(false);
-  const [isImagePreviewOpen, setIsImagePreviewOpen] = useState(false);
-  const importInputRef = useRef<HTMLInputElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const nextOffsetRef = useRef(0);
   const requestSequenceRef = useRef(0);
-  const [importCategory, setImportCategory] = useState("");
-  const [importTags, setImportTags] = useState("");
-  const [importNote, setImportNote] = useState("");
+  const pickerRole = useMemo(() => {
+    const value = new URLSearchParams(location.search).get("pick");
+    return value === "mask" ? "mask" : value === "image" ? "image" : "";
+  }, [location.search]);
+  const pickerForward = useMemo(
+    () => parseWorkspaceForwardPayload(location.search),
+    [location.search],
+  );
 
-  const refreshAssets = useCallback(async (mode: "reset" | "append" = "reset") => {
-    const requestId = requestSequenceRef.current + 1;
-    requestSequenceRef.current = requestId;
-    if (mode === "reset") {
-      setIsLoading(true);
-    } else {
-      setIsLoadingMore(true);
-    }
-    try {
-      const [result, stats] = await Promise.all([
-        listUnifiedImageAssets({
-          query,
-          category: selectedCategory || undefined,
-          tag: selectedTag || undefined,
-          favorite: favoriteOnly,
-          limit: IMAGE_PAGE_SIZE,
-          offset: mode === "append" ? nextOffsetRef.current : 0,
-          sort: selectedSort,
-        }),
-        fetchImageAssetStats(),
-      ]);
-      if (requestSequenceRef.current !== requestId) {
-        return;
-      }
-      setItems((current) =>
-        mode === "append" ? mergeAssetsById(current, result.items) : result.items,
-      );
-      setCategories(stats.categories.map((item) => item.category));
-      setAllTags(stats.tags.map((item) => item.tag));
-      setTagStats(stats.tags);
-      setHasMore(result.hasMore);
-      setNextOffset(result.nextOffset);
-      setTotal(result.total);
-    } catch (error) {
-      if (requestSequenceRef.current !== requestId) {
-        return;
-      }
-      toast.error(error instanceof Error ? error.message : "读取图片库失败");
-    }
-    if (requestSequenceRef.current !== requestId) {
-      return;
-    }
-    try {
+  const refreshAssets = useCallback(
+    async (mode: "reset" | "append" = "reset") => {
+      const requestId = requestSequenceRef.current + 1;
+      requestSequenceRef.current = requestId;
       if (mode === "reset") {
-        setIsLoading(false);
+        setIsLoading(true);
       } else {
-        setIsLoadingMore(false);
+        setIsLoadingMore(true);
       }
-    } catch {
-      // no-op
-    }
-  }, [favoriteOnly, query, selectedCategory, selectedSort, selectedTag]);
+      try {
+        const [result, stats] = await Promise.all([
+          listUnifiedImageAssets({
+            query,
+            category: selectedCategory || undefined,
+            tag: selectedTag || undefined,
+            favorite: favoriteOnly,
+            limit: IMAGE_PAGE_SIZE,
+            offset: mode === "append" ? nextOffsetRef.current : 0,
+            sort: selectedSort,
+          }),
+          fetchImageAssetStats(),
+        ]);
+        if (requestSequenceRef.current !== requestId) {
+          return;
+        }
+        setItems((current) =>
+          mode === "append"
+            ? mergeAssetsById(current, result.items)
+            : result.items,
+        );
+        setCategories(stats.categories.map((item) => item.category));
+        setAllTags(stats.tags.map((item) => item.tag));
+        setTagStats(stats.tags);
+        setHasMore(result.hasMore);
+        setNextOffset(result.nextOffset);
+        setTotal(result.total);
+      } catch (error) {
+        if (requestSequenceRef.current !== requestId) {
+          return;
+        }
+        toast.error(error instanceof Error ? error.message : "读取图片库失败");
+      }
+      if (requestSequenceRef.current !== requestId) {
+        return;
+      }
+      try {
+        if (mode === "reset") {
+          setIsLoading(false);
+        } else {
+          setIsLoadingMore(false);
+        }
+      } catch {
+        // no-op
+      }
+    },
+    [favoriteOnly, query, selectedCategory, selectedSort, selectedTag],
+  );
 
   useEffect(() => {
     void refreshAssets("reset");
@@ -290,7 +341,6 @@ export default function ImagesPage() {
       setEditingTags("");
       setEditingNote("");
       setIsPromptExpanded(false);
-      setIsImagePreviewOpen(false);
       return;
     }
     setEditingTitle(selectedAsset.title || "");
@@ -327,6 +377,18 @@ export default function ImagesPage() {
       },
     ].filter((item) => item.value);
   }, [selectedAsset]);
+  const assetById = useMemo(
+    () => new Map(items.map((item) => [item.id, item] as const)),
+    [items],
+  );
+  const selectedAssetSourceDetails = useMemo<AssetSourceDetail[]>(() => {
+    if (!selectedAsset?.sourceImages?.length) {
+      return [];
+    }
+    return selectedAsset.sourceImages.map((item) =>
+      buildAssetSourceDetail(item, assetById, missingSourceAssetIds),
+    );
+  }, [assetById, missingSourceAssetIds, selectedAsset]);
   const selectedAssetIdSet = useMemo(
     () => new Set(selectedAssetIds),
     [selectedAssetIds],
@@ -382,9 +444,15 @@ export default function ImagesPage() {
     if (!selectedAsset) {
       return;
     }
+    const nextTitle = editingTitle.trim();
+    if (!nextTitle) {
+      toast.warning("请输入标题");
+      return;
+    }
     setIsSaving(true);
     try {
       const result = await updateUnifiedImageAsset(selectedAsset.id, {
+        title: nextTitle,
         category: editingCategory,
         tags: splitTagsInput(editingTags),
         note: editingNote,
@@ -392,7 +460,9 @@ export default function ImagesPage() {
       });
       setSelectedAsset(result.item);
       setItems((current) =>
-        current.map((item) => (item.id === result.item.id ? result.item : item)),
+        current.map((item) =>
+          item.id === result.item.id ? result.item : item,
+        ),
       );
       toast.success("图片信息已更新");
       await refreshAssets("reset");
@@ -442,41 +512,6 @@ export default function ImagesPage() {
       setIsBulkSaving(false);
     }
   };
-
-  const handleSaveTitle = async () => {
-    if (!selectedAsset) {
-      return;
-    }
-    const nextTitle = editingTitle.trim();
-    if (!nextTitle) {
-      toast.warning("请输入标题");
-      return;
-    }
-    if (nextTitle === selectedAsset.title) {
-      toast.info("标题没有变化");
-      return;
-    }
-    setIsTitleSaving(true);
-    try {
-      const result = await updateUnifiedImageAsset(selectedAsset.id, {
-        title: nextTitle,
-      });
-      setSelectedAsset(result.item);
-      setItems((current) =>
-        current.map((item) => (item.id === result.item.id ? result.item : item)),
-      );
-      toast.success("标题已更新");
-      await refreshAssets("reset");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "标题保存失败");
-    } finally {
-      setIsTitleSaving(false);
-    }
-  };
-
-  const isTitleDirty = Boolean(
-    selectedAsset && editingTitle.trim() && editingTitle.trim() !== selectedAsset.title,
-  );
   const promptPreviewText = selectedAsset?.prompt || "";
   const shouldCollapsePrompt = promptPreviewText.trim().length > 220;
 
@@ -513,7 +548,9 @@ export default function ImagesPage() {
         const deletedFile = deleteFileToo && result.deletedFile;
         toast.success(deletedFile ? "图片和源文件已删除" : "图片记录已删除");
         setItems((current) => current.filter((item) => item.id !== asset.id));
-        setSelectedAssetIds((current) => current.filter((id) => id !== asset.id));
+        setSelectedAssetIds((current) =>
+          current.filter((id) => id !== asset.id),
+        );
         if (selectedAsset?.id === asset.id) {
           setSelectedAsset(null);
         }
@@ -549,47 +586,90 @@ export default function ImagesPage() {
     }
   };
 
-  const handlePickImportFiles = () => {
-    importInputRef.current?.click();
-  };
+  const handleOpenSourceAsset = useCallback(
+    async (assetId?: string) => {
+      const normalizedAssetId = String(assetId || "").trim();
+      if (!normalizedAssetId) {
+        return;
+      }
+      try {
+        const result = await getUnifiedImageAsset(normalizedAssetId);
+        setItems((current) => mergeAssetsById(current, [result.item]));
+        setMissingSourceAssetIds((current) => {
+          if (!current.has(normalizedAssetId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(normalizedAssetId);
+          return next;
+        });
+        setSelectedAsset(result.item);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          setItems((current) =>
+            current.filter((item) => item.id !== normalizedAssetId),
+          );
+          setMissingSourceAssetIds((current) => {
+            if (current.has(normalizedAssetId)) {
+              return current;
+            }
+            const next = new Set(current);
+            next.add(normalizedAssetId);
+            return next;
+          });
+          toast.warning("引用图片已删除");
+          return;
+        }
+        toast.error(error instanceof Error ? error.message : "读取参考图失败");
+      }
+    },
+    [],
+  );
 
-  const handleImportFiles = async (files: FileList | null) => {
-    const normalizedFiles = files ? Array.from(files) : [];
-    if (normalizedFiles.length === 0) {
-      return;
-    }
-    setIsImporting(true);
-    try {
-      const data = await importUnifiedImageAssets(normalizedFiles, {
-        category: importCategory,
-        tags: splitTagsInput(importTags),
-        note: importNote,
+  const handleForwardAssetToWorkspace = useCallback(
+    (asset: ImageAsset) => {
+      const imageUrl = normalizeImageURL(asset.imageUrl);
+      if (!imageUrl) {
+        toast.warning("这张图片当前没有可用地址");
+        return;
+      }
+      const search = buildWorkspaceForwardSearch({
+        title: pickerForward?.title ?? asset.title,
+        mode:
+          pickerForward?.mode ?? (pickerRole === "mask" ? "edit" : "generate"),
+        prompt: pickerForward?.prompt ?? asset.prompt,
+        count: pickerForward?.count ?? 1,
+        category: pickerForward?.category ?? asset.category,
+        tags:
+          pickerForward?.tags && pickerForward.tags.length > 0
+            ? pickerForward.tags
+            : asset.tags,
+        images: [
+          ...(pickerForward?.images ?? []),
+          {
+            role: pickerRole === "mask" ? "mask" : "image",
+            name: asset.filename || asset.title || "gallery-image.png",
+            url: imageUrl,
+            origin: {
+              type: "gallery",
+              confirmed: true,
+              gallery: {
+                assetId: asset.id,
+                conversationId: asset.conversationId ?? undefined,
+                turnId: asset.turnId ?? undefined,
+                imageId: asset.imageId ?? undefined,
+              },
+              assetTitle: asset.title,
+              sourceKind: asset.sourceKind ?? undefined,
+              fromPage: "/images",
+            },
+          },
+        ],
       });
-      const summary = countImportErrors(data);
-      await refreshAssets("reset");
-      setImportCategory("");
-      setImportTags("");
-      setImportNote("");
-      if (summary.failed > 0) {
-        toast.error(
-          `已导入 ${summary.imported} 张，失败 ${summary.failed} 张${summary.skipped > 0 ? `，跳过 ${summary.skipped} 张` : ""}`,
-        );
-      } else if (summary.skipped > 0) {
-        toast.success(
-          `已导入 ${summary.imported} 张，跳过 ${summary.skipped} 张重复图片`,
-        );
-      } else {
-        toast.success(`已导入 ${summary.imported} 张图片`);
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "导入图片失败");
-    } finally {
-      setIsImporting(false);
-      if (importInputRef.current) {
-        importInputRef.current.value = "";
-      }
-    }
-  };
+      navigate(`/image/workspace?${search}`);
+    },
+    [navigate, pickerForward, pickerRole],
+  );
 
   return (
     <section className="h-full">
@@ -611,27 +691,6 @@ export default function ImagesPage() {
               <div className="rounded-[24px] border border-stone-200/80 bg-white/80 px-4 py-3 text-sm text-stone-600 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)] dark:text-[var(--studio-text-muted)]">
                 已加载 {items.length} / {total || items.length} 张匹配图片
               </div>
-              <Button
-                type="button"
-                className="rounded-full bg-stone-950 text-white hover:bg-stone-800"
-                onClick={handlePickImportFiles}
-                disabled={isImporting}
-              >
-                {isImporting ? (
-                  <LoaderCircle className="size-4 animate-spin" />
-                ) : (
-                  <Upload className="size-4" />
-                )}
-                导入图片
-              </Button>
-              <input
-                ref={importInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(event) => void handleImportFiles(event.target.files)}
-              />
             </div>
           </div>
 
@@ -752,32 +811,11 @@ export default function ImagesPage() {
               onClick={() => void handleBulkSave()}
               disabled={selectedAssetIds.length === 0 || isBulkSaving}
             >
-              {isBulkSaving ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isBulkSaving ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               批量更新
             </Button>
-          </div>
-
-          <div className="grid gap-3 rounded-[26px] border border-stone-200/80 bg-white/75 p-4 shadow-sm dark:border-[var(--studio-border)] dark:bg-[var(--studio-panel-soft)] lg:grid-cols-[220px_minmax(0,1fr)]">
-            <Input
-              value={importCategory}
-              onChange={(event) => setImportCategory(event.target.value)}
-              placeholder="导入分类（可选）"
-              className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
-            />
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-              <Input
-                value={importTags}
-                onChange={(event) => setImportTags(event.target.value)}
-                placeholder="导入标签，多个用逗号分隔（可选）"
-                className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
-              />
-              <Input
-                value={importNote}
-                onChange={(event) => setImportNote(event.target.value)}
-                placeholder="导入备注（可选）"
-                className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
-              />
-            </div>
           </div>
 
           {tagStats.length > 0 ? (
@@ -854,12 +892,20 @@ export default function ImagesPage() {
                             }}
                             className={cn(
                               "absolute right-3 top-3 inline-flex size-10 items-center justify-center rounded-full border border-white/70 bg-black/35 text-white backdrop-blur transition hover:bg-black/55",
-                              asset.favorite && "bg-rose-500/85 hover:bg-rose-500",
+                              asset.favorite &&
+                                "bg-rose-500/85 hover:bg-rose-500",
                             )}
-                            aria-label={asset.favorite ? "取消收藏" : "收藏图片"}
+                            aria-label={
+                              asset.favorite ? "取消收藏" : "收藏图片"
+                            }
                             title={asset.favorite ? "取消收藏" : "收藏图片"}
                           >
-                            <Heart className={cn("size-4", asset.favorite && "fill-current")} />
+                            <Heart
+                              className={cn(
+                                "size-4",
+                                asset.favorite && "fill-current",
+                              )}
+                            />
                           </button>
                           <button
                             type="button"
@@ -869,10 +915,19 @@ export default function ImagesPage() {
                             }}
                             className={cn(
                               "absolute left-3 top-3 inline-flex size-10 items-center justify-center rounded-full border border-white/70 bg-black/35 text-white backdrop-blur transition hover:bg-black/55",
-                              selectedAssetIdSet.has(asset.id) && "bg-stone-950/90",
+                              selectedAssetIdSet.has(asset.id) &&
+                                "bg-stone-950/90",
                             )}
-                            aria-label={selectedAssetIdSet.has(asset.id) ? "取消选择图片" : "选择图片"}
-                            title={selectedAssetIdSet.has(asset.id) ? "取消选择图片" : "选择图片"}
+                            aria-label={
+                              selectedAssetIdSet.has(asset.id)
+                                ? "取消选择图片"
+                                : "选择图片"
+                            }
+                            title={
+                              selectedAssetIdSet.has(asset.id)
+                                ? "取消选择图片"
+                                : "选择图片"
+                            }
                           >
                             {selectedAssetIdSet.has(asset.id) ? (
                               <CheckSquare className="size-4" />
@@ -911,6 +966,25 @@ export default function ImagesPage() {
                             ) : null}
                           </div>
 
+                          {pickerRole ? (
+                            <div className="flex justify-end">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="h-8 rounded-full border-stone-200 bg-white text-xs"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleForwardAssetToWorkspace(asset);
+                                }}
+                              >
+                                <WandSparkles className="size-3.5" />
+                                {pickerRole === "mask"
+                                  ? "作为遮罩发送"
+                                  : "发送到工作台"}
+                              </Button>
+                            </div>
+                          ) : null}
+
                           <p className="line-clamp-3 text-sm leading-6 text-stone-600 dark:text-[var(--studio-text-muted)]">
                             {asset.prompt || "无提示词"}
                           </p>
@@ -927,7 +1001,9 @@ export default function ImagesPage() {
                               ))}
                             </div>
                           ) : (
-                            <div className="text-xs text-stone-400">尚未设置标签</div>
+                            <div className="text-xs text-stone-400">
+                              尚未设置标签
+                            </div>
                           )}
                         </div>
                       </button>
@@ -944,7 +1020,9 @@ export default function ImagesPage() {
                   </div>
                 ) : hasMore ? (
                   <div className="flex flex-col items-center gap-3">
-                    <div className="text-xs text-stone-500">向下滚动会自动继续加载</div>
+                    <div className="text-xs text-stone-500">
+                      向下滚动会自动继续加载
+                    </div>
                     <Button
                       type="button"
                       variant="outline"
@@ -955,7 +1033,9 @@ export default function ImagesPage() {
                     </Button>
                   </div>
                 ) : items.length > 0 ? (
-                  <div className="text-center text-xs text-stone-400">已经到底了</div>
+                  <div className="text-center text-xs text-stone-400">
+                    已经到底了
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -963,29 +1043,21 @@ export default function ImagesPage() {
         </div>
       </div>
 
-      <Dialog open={Boolean(selectedAsset)} onOpenChange={(open) => !open && setSelectedAsset(null)}>
+      <Dialog
+        open={Boolean(selectedAsset)}
+        onOpenChange={(open) => !open && setSelectedAsset(null)}
+      >
         <DialogContent className="w-[min(96vw,1080px)] max-w-none overflow-hidden p-0">
           {selectedAsset ? (
             <div className="grid max-h-[86vh] grid-cols-1 overflow-hidden lg:grid-cols-[1.1fr_0.9fr]">
               <div className="overflow-auto bg-[#ede5db] p-4 dark:bg-[var(--studio-panel)]">
                 {selectedImageURL ? (
                   <div className="space-y-3">
-                    <button
-                      type="button"
-                      onClick={() => setIsImagePreviewOpen(true)}
-                      className="group relative block w-full"
-                      aria-label={`放大查看 ${selectedAsset.title || "图片"}`}
-                    >
-                      <AppImage
-                        src={selectedImageURL}
-                        alt={selectedAsset.title}
-                        className="mx-auto block max-h-[72vh] w-auto max-w-full rounded-[24px] shadow-[0_20px_55px_-28px_rgba(0,0,0,0.45)] transition duration-200 group-hover:shadow-[0_24px_60px_-28px_rgba(0,0,0,0.5)]"
-                      />
-                      <span className="pointer-events-none absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border border-white/70 bg-black/40 px-3 py-1.5 text-xs font-medium text-white backdrop-blur">
-                        <Maximize2 className="size-3.5" />
-                        放大查看
-                      </span>
-                    </button>
+                    <ZoomableImage
+                      src={selectedImageURL}
+                      alt={selectedAsset.title}
+                      className="mx-auto block max-h-[72vh] w-auto max-w-full rounded-[24px] shadow-[0_20px_55px_-28px_rgba(0,0,0,0.45)] transition duration-200 hover:shadow-[0_24px_60px_-28px_rgba(0,0,0,0.5)]"
+                    />
                     <div className="text-center text-xs text-stone-500 dark:text-[var(--studio-text-muted)]">
                       点击图片可进入放大预览
                     </div>
@@ -1007,29 +1079,17 @@ export default function ImagesPage() {
                     >
                       标题
                     </label>
-                    <div className="flex flex-col gap-3 sm:flex-row">
-                      <Input
-                        id="image-asset-title"
-                        value={editingTitle}
-                        onChange={(event) => setEditingTitle(event.target.value)}
-                        placeholder="请输入图片标题"
-                        className="h-12 rounded-2xl border-stone-200 bg-stone-50 text-base font-semibold shadow-none"
-                      />
-                      <Button
-                        type="button"
-                        className="rounded-full bg-stone-950 text-white hover:bg-stone-800"
-                        onClick={() => void handleSaveTitle()}
-                        disabled={isTitleSaving || !isTitleDirty}
-                      >
-                        {isTitleSaving ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : null}
-                        保存标题
-                      </Button>
-                    </div>
+                    <Input
+                      id="image-asset-title"
+                      value={editingTitle}
+                      onChange={(event) => setEditingTitle(event.target.value)}
+                      placeholder="请输入图片标题"
+                      className="h-12 rounded-2xl border-stone-200 bg-stone-50 text-base font-semibold shadow-none"
+                    />
                   </div>
                   <DialogDescription>
-                    {formatAssetTime(selectedAsset.createdAt)} · {selectedAsset.model || "未知模型"}
+                    {formatAssetTime(selectedAsset.createdAt)} ·{" "}
+                    {selectedAsset.model || "未知模型"}
                   </DialogDescription>
                 </DialogHeader>
 
@@ -1040,7 +1100,9 @@ export default function ImagesPage() {
                     </label>
                     <Input
                       value={editingCategory}
-                      onChange={(event) => setEditingCategory(event.target.value)}
+                      onChange={(event) =>
+                        setEditingCategory(event.target.value)
+                      }
                       placeholder="比如：角色、海报、摄影、概念图"
                       className="h-11 rounded-2xl border-stone-200 bg-stone-50 shadow-none"
                     />
@@ -1073,16 +1135,33 @@ export default function ImagesPage() {
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-3 rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
                       <div>
-                        <div className="text-sm font-medium text-stone-900">提示词</div>
-                        <div className="text-xs text-stone-500">保留原始提示词，方便复用</div>
+                        <div className="text-sm font-medium text-stone-900">
+                          提示词
+                        </div>
+                        <div className="text-xs text-stone-500">
+                          保留原始提示词，方便复用
+                        </div>
                       </div>
                       <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="rounded-full border-stone-200 bg-white"
+                          onClick={() =>
+                            handleForwardAssetToWorkspace(selectedAsset)
+                          }
+                        >
+                          <WandSparkles className="size-4" />
+                          转发到工作台
+                        </Button>
                         {shouldCollapsePrompt ? (
                           <Button
                             type="button"
                             variant="outline"
                             className="rounded-full border-stone-200 bg-white"
-                            onClick={() => setIsPromptExpanded((current) => !current)}
+                            onClick={() =>
+                              setIsPromptExpanded((current) => !current)
+                            }
                           >
                             {isPromptExpanded ? (
                               <ChevronUp className="size-4" />
@@ -1096,7 +1175,9 @@ export default function ImagesPage() {
                           type="button"
                           variant="outline"
                           className="rounded-full border-stone-200 bg-white"
-                          onClick={() => void copyText(selectedAsset.prompt, "提示词已复制")}
+                          onClick={() =>
+                            void copyText(selectedAsset.prompt, "提示词已复制")
+                          }
                         >
                           <Copy className="size-4" />
                           复制
@@ -1104,7 +1185,13 @@ export default function ImagesPage() {
                       </div>
                     </div>
                     <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4 text-sm leading-7 text-stone-700">
-                      <p className={cn(!isPromptExpanded && shouldCollapsePrompt && "line-clamp-4")}>
+                      <p
+                        className={cn(
+                          !isPromptExpanded &&
+                            shouldCollapsePrompt &&
+                            "line-clamp-4",
+                        )}
+                      >
                         {selectedAsset.prompt || "无提示词"}
                       </p>
                     </div>
@@ -1152,6 +1239,72 @@ export default function ImagesPage() {
                           </div>
                         ))}
                       </dl>
+                    </div>
+                  ) : null}
+
+                  {selectedAssetSourceDetails.length > 0 ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-sm font-medium text-stone-900">
+                        <Database className="size-4 text-stone-500" />
+                        参考图
+                      </div>
+                      <div className="grid gap-3 rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4 sm:grid-cols-2">
+                        {selectedAssetSourceDetails.map((item, index) => {
+                          const canOpen = item.canOpenGalleryAsset;
+                          return (
+                            <button
+                              key={`${item.role}-${item.label}-${index}`}
+                              type="button"
+                              onClick={() =>
+                                canOpen
+                                  ? void handleOpenSourceAsset(item.galleryAssetId)
+                                  : undefined
+                              }
+                              disabled={!canOpen}
+                              title={canOpen ? "打开图库资产" : item.detail}
+                              className={cn(
+                                "group flex min-w-0 items-center gap-3 rounded-2xl border border-stone-200/80 bg-white/85 p-2 text-left transition",
+                                canOpen
+                                  ? "hover:border-stone-300 hover:bg-white hover:shadow-sm"
+                                  : "cursor-default",
+                              )}
+                            >
+                              <div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-stone-100">
+                                {item.imageUrl ? (
+                                  <AppImage
+                                    src={item.imageUrl}
+                                    alt={item.label}
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <Database className="size-5 text-stone-400" />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                                    {item.role === "mask" ? "Mask" : "Image"}
+                                  </span>
+                                  {canOpen ? (
+                                    <span className="text-[11px] text-stone-400 transition group-hover:text-stone-700">
+                                      打开
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div
+                                  className="mt-1 truncate text-sm font-semibold text-stone-800"
+                                  title={item.label}
+                                >
+                                  {item.label}
+                                </div>
+                                <div className="mt-1 line-clamp-2 break-all text-xs leading-5 text-stone-500">
+                                  {item.detail}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   ) : null}
 
@@ -1231,7 +1384,9 @@ export default function ImagesPage() {
             <div className="p-6">
               <DialogHeader>
                 <DialogTitle>
-                  {deleteDialogState.mode === "single" ? "删除图片" : "批量删除图片"}
+                  {deleteDialogState.mode === "single"
+                    ? "删除图片"
+                    : "批量删除图片"}
                 </DialogTitle>
                 <DialogDescription>
                   {deleteDialogState.mode === "single"
@@ -1250,7 +1405,9 @@ export default function ImagesPage() {
                 <label className="flex items-start gap-3 rounded-[22px] border border-rose-200/70 bg-rose-50/70 px-4 py-3 text-sm text-stone-700 dark:border-rose-900/50 dark:bg-rose-950/10 dark:text-[var(--studio-text)]">
                   <Checkbox
                     checked={deleteFileToo}
-                    onCheckedChange={(checked) => setDeleteFileToo(Boolean(checked))}
+                    onCheckedChange={(checked) =>
+                      setDeleteFileToo(Boolean(checked))
+                    }
                     className="mt-0.5"
                   />
                   <span className="leading-6">同时删除源文件</span>
@@ -1281,49 +1438,6 @@ export default function ImagesPage() {
                   确认删除
                 </Button>
               </DialogFooter>
-            </div>
-          ) : null}
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={isImagePreviewOpen}
-        onOpenChange={(open) => setIsImagePreviewOpen(open)}
-      >
-        <DialogContent className="w-[min(96vw,1240px)] max-w-none overflow-hidden border-stone-200 bg-[#111] p-0 dark:border-[var(--studio-border)]">
-          {selectedAsset ? (
-            <div className="flex max-h-[92vh] flex-col">
-              <div className="flex items-center justify-between gap-4 border-b border-white/10 px-6 py-4 text-white">
-                <div className="min-w-0">
-                  <DialogTitle className="truncate text-base font-semibold text-white">
-                    {selectedAsset.title || "图片预览"}
-                  </DialogTitle>
-                  <DialogDescription className="truncate text-xs text-white/65">
-                    点击弹层外区域或右上角关闭预览
-                  </DialogDescription>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="rounded-full border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"
-                  onClick={() => setIsImagePreviewOpen(false)}
-                >
-                  关闭
-                </Button>
-              </div>
-              <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4 sm:p-6">
-                {selectedImageURL ? (
-                  <AppImage
-                    src={selectedImageURL}
-                    alt={selectedAsset.title}
-                    className="h-auto max-h-full w-auto max-w-full rounded-[24px] object-contain shadow-[0_24px_70px_-32px_rgba(0,0,0,0.75)]"
-                  />
-                ) : (
-                  <div className="flex min-h-[320px] w-full items-center justify-center rounded-[24px] bg-white/5 text-sm text-white/65">
-                    图片不可预览
-                  </div>
-                )}
-              </div>
             </div>
           ) : null}
         </DialogContent>
