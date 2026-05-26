@@ -488,14 +488,9 @@ func (s *Server) imageAssetCandidateDirs() []string {
 }
 
 func (s *Server) handleImportImageAssets(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(int64(max(1, s.cfg.App.MaxUploadSizeMB)) << 20); err != nil {
+	reader, err := r.MultipartReader()
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
-		return
-	}
-
-	files := imageAssetMultipartFiles(r.MultipartForm)
-	if len(files) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at least one image file is required"})
 		return
 	}
 
@@ -506,45 +501,89 @@ func (s *Server) handleImportImageAssets(w http.ResponseWriter, r *http.Request)
 	}
 	defer store.Close()
 
-	category := strings.TrimSpace(r.FormValue("category"))
-	tags := splitImageAssetTags(r.FormValue("tags"))
-	note := strings.TrimSpace(r.FormValue("note"))
 	imageDir := s.cfg.ResolvePath(s.cfg.Storage.ImageDir)
 	maxImageBytes := int64(max(1, s.cfg.App.MaxUploadSizeMB)) << 20
+	category := ""
+	tags := []string{}
+	note := ""
+	files := []importedImageAssetPayload{}
 	imported := make([]imageAssetView, 0, len(files))
 	failures := []imageAssetImportFailureView{}
 
-	for _, fileHeader := range files {
-		name := strings.TrimSpace(fileHeader.Filename)
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+			return
+		}
+		fieldName := strings.TrimSpace(part.FormName())
+		filename := strings.TrimSpace(part.FileName())
+		if filename == "" {
+			value, readErr := readMultipartFieldValue(part, 1<<20)
+			if readErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": readErr.Error()})
+				return
+			}
+			switch fieldName {
+			case "category":
+				category = strings.TrimSpace(value)
+			case "tags":
+				tags = splitImageAssetTags(value)
+			case "note":
+				note = strings.TrimSpace(value)
+			}
+			continue
+		}
+		if !isImageAssetMultipartFileField(fieldName) {
+			continue
+		}
+		name := filename
 		if name == "" {
 			name = "image"
 		}
-		if fileHeader.Size > maxImageBytes {
+		payload, tooLarge, readErr := readMultipartPartWithLimit(part, maxImageBytes)
+		if tooLarge {
 			failures = append(failures, imageAssetImportFailureView{Name: name, Error: "image exceeds max upload size"})
 			continue
 		}
-		payload, err := readMultipartFile(fileHeader)
-		if err != nil {
-			failures = append(failures, imageAssetImportFailureView{Name: name, Error: err.Error()})
+		if readErr != nil {
+			failures = append(failures, imageAssetImportFailureView{Name: name, Error: readErr.Error()})
 			continue
 		}
-		mimeType := detectImportedImageMIME(payload, fileHeader.Header.Get("Content-Type"), name)
+		files = append(files, importedImageAssetPayload{
+			Name:        name,
+			Payload:     payload,
+			ContentType: strings.TrimSpace(part.Header.Get("Content-Type")),
+		})
+	}
+
+	if len(files) == 0 && len(failures) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at least one image file is required"})
+		return
+	}
+
+	imported = make([]imageAssetView, 0, len(files))
+	for _, file := range files {
+		mimeType := detectImportedImageMIME(file.Payload, file.ContentType, file.Name)
 		if mimeType == "" {
-			failures = append(failures, imageAssetImportFailureView{Name: name, Error: "file is not a supported image"})
+			failures = append(failures, imageAssetImportFailureView{Name: file.Name, Error: "file is not a supported image"})
 			continue
 		}
-		info, err := imageassets.SaveImageBytes(imageDir, payload, imageassets.FileSaveOptions{
+		info, err := imageassets.SaveImageBytes(imageDir, file.Payload, imageassets.FileSaveOptions{
 			SourceKind:   "import",
 			MIMEType:     mimeType,
-			OriginalName: name,
+			OriginalName: file.Name,
 		})
 		if err != nil {
-			failures = append(failures, imageAssetImportFailureView{Name: name, Error: err.Error()})
+			failures = append(failures, imageAssetImportFailureView{Name: file.Name, Error: err.Error()})
 			continue
 		}
 		asset := imageassets.Asset{
 			ID:          buildImportedImageAssetID(info.SHA256),
-			Title:       importedImageAssetTitle(name),
+			Title:       importedImageAssetTitle(file.Name),
 			Mode:        "import",
 			Model:       "external",
 			CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
@@ -556,14 +595,14 @@ func (s *Server) handleImportImageAssets(w http.ResponseWriter, r *http.Request)
 			SHA256:      info.SHA256,
 			StorageKind: info.StorageKind,
 			SourceKind:  info.SourceKind,
-			OriginalURL: strings.TrimSpace(name),
+			OriginalURL: strings.TrimSpace(file.Name),
 			Category:    category,
 			Tags:        append([]string(nil), tags...),
 			Note:        note,
 		}
 		saved, err := store.Save(r.Context(), asset)
 		if err != nil {
-			failures = append(failures, imageAssetImportFailureView{Name: name, Error: err.Error()})
+			failures = append(failures, imageAssetImportFailureView{Name: file.Name, Error: err.Error()})
 			continue
 		}
 		imported = append(imported, buildImageAssetView(*saved))
@@ -1074,6 +1113,47 @@ func imageAssetMultipartFiles(form *multipart.Form) []*multipart.FileHeader {
 		result = append(result, form.File[key]...)
 	}
 	return result
+}
+
+type importedImageAssetPayload struct {
+	Name        string
+	Payload     []byte
+	ContentType string
+}
+
+func isImageAssetMultipartFileField(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "images", "images[]", "image", "file", "files":
+		return true
+	default:
+		return false
+	}
+}
+
+func readMultipartPartWithLimit(part *multipart.Part, maxBytes int64) ([]byte, bool, error) {
+	if part == nil {
+		return nil, false, fmt.Errorf("invalid multipart part")
+	}
+	limited := io.LimitReader(part, maxBytes+1)
+	payload, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, true, nil
+	}
+	return payload, false, nil
+}
+
+func readMultipartFieldValue(part *multipart.Part, maxBytes int64) (string, error) {
+	payload, tooLarge, err := readMultipartPartWithLimit(part, maxBytes)
+	if err != nil {
+		return "", err
+	}
+	if tooLarge {
+		return "", fmt.Errorf("multipart field exceeds max size")
+	}
+	return string(payload), nil
 }
 
 func buildImportedImageAssetID(sha256 string) string {

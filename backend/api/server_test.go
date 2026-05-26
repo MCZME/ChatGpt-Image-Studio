@@ -1137,6 +1137,150 @@ func TestHandleImportImageAssetsRejectsNonImage(t *testing.T) {
 	}
 }
 
+func TestHandleImportImageAssetsReturnsPartialFailureForOversizedFile(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.App.MaxUploadSizeMB = 1
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	oversizedPayload := append([]byte{}, pngTestImageBytes()...)
+	oversizedPayload = append(oversizedPayload, bytes.Repeat([]byte{0}, 1<<20)...)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	smallPart, err := writer.CreateFormFile("images[]", "small.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(small) returned error: %v", err)
+	}
+	if _, err := smallPart.Write(pngTestImageBytes()); err != nil {
+		t.Fatalf("Write(small) returned error: %v", err)
+	}
+	largePart, err := writer.CreateFormFile("file", "large.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(large) returned error: %v", err)
+	}
+	if _, err := largePart.Write(oversizedPayload); err != nil {
+		t.Fatalf("Write(large) returned error: %v", err)
+	}
+	if err := writer.WriteField("category", "参考图"); err != nil {
+		t.Fatalf("WriteField(category) returned error: %v", err)
+	}
+	if err := writer.WriteField("tags", "超限, 导入"); err != nil {
+		t.Fatalf("WriteField(tags) returned error: %v", err)
+	}
+	if err := writer.WriteField("note", "partial import"); err != nil {
+		t.Fatalf("WriteField(note) returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/assets/import", &body)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Imported int                           `json:"imported"`
+		Items    []imageAssetView              `json:"items"`
+		Failed   []imageAssetImportFailureView `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Imported != 1 || len(payload.Items) != 1 || len(payload.Failed) != 1 {
+		t.Fatalf("payload = %#v, want one imported item and one failure", payload)
+	}
+	if payload.Failed[0].Name != "large.png" || !strings.Contains(payload.Failed[0].Error, "exceeds") {
+		t.Fatalf("failed[0] = %#v, want oversized file failure", payload.Failed[0])
+	}
+	item := payload.Items[0]
+	if item.Category != "参考图" || item.Note != "partial import" {
+		t.Fatalf("item metadata = %#v, want parsed multipart fields", item)
+	}
+	if len(item.Tags) != 2 || item.Tags[0] != "导入" || item.Tags[1] != "超限" {
+		t.Fatalf("item tags = %#v, want parsed tags", item.Tags)
+	}
+
+	store, err := imageassets.NewStore(cfg.RootDir())
+	if err != nil {
+		t.Fatalf("NewStore(asset) returned error: %v", err)
+	}
+	defer store.Close()
+	items, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("stored items len = %d, want 1", len(items))
+	}
+}
+
+func TestHandleImportImageAssetsReturnsFailuresWhenAllFilesAreOversized(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := config.New(rootDir)
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	cfg.App.AuthKey = "test-auth"
+	cfg.App.MaxUploadSizeMB = 1
+	cfg.Storage.ImageDir = "data/assets-images"
+
+	oversizedPayload := append([]byte{}, pngTestImageBytes()...)
+	oversizedPayload = append(oversizedPayload, bytes.Repeat([]byte{0}, 1<<20)...)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("images", "large.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(large) returned error: %v", err)
+	}
+	if _, err := part.Write(oversizedPayload); err != nil {
+		t.Fatalf("Write(large) returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) returned error: %v", err)
+	}
+
+	server := NewServer(cfg, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/assets/import", &body)
+	req.Header.Set("Authorization", "Bearer "+cfg.App.AuthKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Error    string                        `json:"error"`
+		Imported int                           `json:"imported"`
+		Items    []imageAssetView              `json:"items"`
+		Failed   []imageAssetImportFailureView `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() returned error: %v", err)
+	}
+	if payload.Error != "" {
+		t.Fatalf("error = %q, want structured import failures", payload.Error)
+	}
+	if payload.Imported != 0 || len(payload.Items) != 0 || len(payload.Failed) != 1 {
+		t.Fatalf("payload = %#v, want one structured oversized failure", payload)
+	}
+	if payload.Failed[0].Name != "large.png" || !strings.Contains(payload.Failed[0].Error, "exceeds") {
+		t.Fatalf("failed[0] = %#v, want oversized file failure", payload.Failed[0])
+	}
+}
+
 func TestHandleDeleteImageAssetKeepsSourceFileByDefault(t *testing.T) {
 	rootDir := t.TempDir()
 	cfg := config.New(rootDir)

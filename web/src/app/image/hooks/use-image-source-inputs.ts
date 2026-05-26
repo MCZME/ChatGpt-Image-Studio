@@ -8,6 +8,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 
+import type { ImageAssetImportResponse } from "@/lib/api";
 import { importUnifiedImageAssets } from "@/store/image-assets";
 import type { ImageMode } from "@/store/image-conversations";
 import type {
@@ -77,6 +78,40 @@ function fileSourcePath(file: File) {
   return withPath.path || withPath.webkitRelativePath || file.name;
 }
 
+function summarizeImportFailures(
+  failures: NonNullable<ImageAssetImportResponse["failed"]>,
+) {
+  return failures
+    .map((failure) => {
+      const name = String(failure.name || "").trim();
+      const error = String(failure.error || "").trim();
+      if (!name && !error) {
+        return "";
+      }
+      if (!name) {
+        return error;
+      }
+      if (!error) {
+        return name;
+      }
+      return `${name}：${error}`;
+    })
+    .filter(Boolean);
+}
+
+export function summarizeSourceImportResult(result: ImageAssetImportResponse) {
+  const importedItems = Array.isArray(result.items)
+    ? result.items.filter((item) => item.imageUrl)
+    : [];
+  const failed = Array.isArray(result.failed) ? result.failed : [];
+  const failureDetails = summarizeImportFailures(failed);
+  return {
+    importedItems,
+    failedCount: failed.length,
+    failureDetails,
+  };
+}
+
 export function shouldImportSourceFiles({
   role,
   autoImportUploadedSources,
@@ -112,10 +147,11 @@ export function useImageSourceInputs({
       if (shouldImport) {
         try {
           const result = await importUnifiedImageAssets(normalizedFiles);
-          const importedItems = Array.isArray(result.items) ? result.items : [];
+          const { importedItems, failedCount, failureDetails } =
+            summarizeSourceImportResult(result);
+          let importedCount = 0;
           if (importedItems.length > 0) {
             const nextItems: StoredSourceImage[] = importedItems
-              .filter((item) => item.imageUrl)
               .map((item) =>
                 buildStoredSourceImageFromURL({
                   id: makeId(),
@@ -138,14 +174,29 @@ export function useImageSourceInputs({
                 }),
               );
             if (nextItems.length > 0) {
+              importedCount = nextItems.length;
               setSourceImages((prev) => [
                 ...prev.filter((item) => item.role !== "mask"),
                 ...prev.filter((item) => item.role === "mask"),
                 ...nextItems,
               ]);
-              toast.success(`已添加并同步 ${nextItems.length} 张来源图到图库`);
+            }
+          }
+          if (failedCount > 0) {
+            const failureText =
+              failureDetails.length > 0 ? `：${failureDetails.join("；")}` : "";
+            if (importedCount > 0) {
+              toast.error(
+                `已添加并同步 ${importedCount} 张来源图到图库，另有 ${failedCount} 张导入失败${failureText}`,
+              );
               return;
             }
+            toast.error(`来源图导入失败 ${failedCount} 张${failureText}`);
+            return;
+          }
+          if (importedCount > 0) {
+            toast.success(`已添加并同步 ${importedCount} 张来源图到图库`);
+            return;
           }
         } catch (error) {
           toast.error(
